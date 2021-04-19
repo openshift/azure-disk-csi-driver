@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	volumehelper "sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -433,14 +434,17 @@ func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolume
 		return nil, status.Error(codes.InvalidArgument, "volume path must be provided")
 	}
 
-	isBlock, err := hostutil.NewHostUtil().PathIsDevice(volumePath)
+	isBlock, err := isBlockDevice(volumePath)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "failed to determine device path for volumePath [%v]: %v", volumePath, err)
 	}
 	if isBlock {
-		// Noop for Block NodeExpandVolume
+		gotBlockSizeBytes, err := d.getBlockSizeBytes(volumePath)
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("Could not get size of block volume at path %s: %v", volumePath, err))
+		}
 		klog.V(4).Infof("NodeExpandVolume succeeded on %v to %s, path check is block so this is a no-op", volumeID, volumePath)
-		return &csi.NodeExpandVolumeResponse{}, nil
+		return &csi.NodeExpandVolumeResponse{CapacityBytes: gotBlockSizeBytes}, nil
 	}
 
 	// Hopefully devicePath was passed from req
@@ -473,7 +477,6 @@ func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolume
 			return &csi.NodeExpandVolumeResponse{}, nil
 		}
 	}
-
 	resizer := resizefs.NewResizeFs(d.mounter)
 	if _, err := resizer.Resize(devicePath, volumePath); err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not resize volume %q (%q):  %v", volumeID, devicePath, err)
@@ -493,6 +496,16 @@ func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolume
 	return &csi.NodeExpandVolumeResponse{
 		CapacityBytes: gotBlockSizeBytes,
 	}, nil
+}
+
+func isBlockDevice(fullPath string) (bool, error) {
+	var st unix.Stat_t
+	err := unix.Stat(fullPath, &st)
+	if err != nil {
+		return false, err
+	}
+
+	return (st.Mode & unix.S_IFMT) == unix.S_IFBLK, nil
 }
 
 func getFStype(attributes map[string]string) string {
