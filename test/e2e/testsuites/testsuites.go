@@ -268,14 +268,6 @@ func (t *TestPersistentVolumeClaim) ValidateProvisionedPersistentVolume() {
 			gomega.Expect(t.persistentVolume.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Values).
 				To(gomega.HaveLen(1))
 		}
-		if len(t.storageClass.AllowedTopologies) > 0 {
-			gomega.Expect(t.persistentVolume.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Key).
-				To(gomega.Equal(t.storageClass.AllowedTopologies[0].MatchLabelExpressions[0].Key))
-			for _, v := range t.persistentVolume.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Values {
-				gomega.Expect(t.storageClass.AllowedTopologies[0].MatchLabelExpressions[0].Values).To(gomega.ContainElement(v))
-			}
-
-		}
 	}
 }
 
@@ -461,7 +453,7 @@ func NewTestDeployment(c clientset.Interface, ns *v1.Namespace, command string, 
 		testDeployment.deployment.Spec.Template.Spec.NodeSelector = map[string]string{
 			"kubernetes.io/os": "windows",
 		}
-		testDeployment.deployment.Spec.Template.Spec.Containers[0].Image = "e2eteam/busybox:1.29"
+		testDeployment.deployment.Spec.Template.Spec.Containers[0].Image = "mcr.microsoft.com/windows/servercore:ltsc2019"
 		if useCMD {
 			testDeployment.deployment.Spec.Template.Spec.Containers[0].Command = []string{"cmd"}
 			testDeployment.deployment.Spec.Template.Spec.Containers[0].Args = []string{"/c", command}
@@ -593,7 +585,7 @@ func NewTestStatefulset(c clientset.Interface, ns *v1.Namespace, command string,
 		testStatefulset.statefulset.Spec.Template.Spec.NodeSelector = map[string]string{
 			"kubernetes.io/os": "windows",
 		}
-		testStatefulset.statefulset.Spec.Template.Spec.Containers[0].Image = "e2eteam/busybox:1.29"
+		testStatefulset.statefulset.Spec.Template.Spec.Containers[0].Image = "mcr.microsoft.com/windows/servercore:ltsc2019"
 		if useCMD {
 			testStatefulset.statefulset.Spec.Template.Spec.Containers[0].Command = []string{"cmd"}
 			testStatefulset.statefulset.Spec.Template.Spec.Containers[0].Args = []string{"/c", command}
@@ -717,7 +709,7 @@ func NewTestPod(c clientset.Interface, ns *v1.Namespace, command string, isWindo
 		testPod.pod.Spec.NodeSelector = map[string]string{
 			"kubernetes.io/os": "windows",
 		}
-		testPod.pod.Spec.Containers[0].Image = "e2eteam/busybox:1.29"
+		testPod.pod.Spec.Containers[0].Image = "mcr.microsoft.com/windows/servercore:ltsc2019"
 		testPod.pod.Spec.Containers[0].Command = []string{"powershell.exe"}
 		testPod.pod.Spec.Containers[0].Args = []string{"-Command", command}
 	}
@@ -795,6 +787,30 @@ func (t *TestPod) SetupVolume(pvc *v1.PersistentVolumeClaim, name, mountPath str
 	t.pod.Spec.Volumes = append(t.pod.Spec.Volumes, volume)
 }
 
+func (t *TestPod) SetupInlineVolume(name, mountPath, diskURI string, readOnly bool) {
+	volumeMount := v1.VolumeMount{
+		Name:      name,
+		MountPath: mountPath,
+		ReadOnly:  readOnly,
+	}
+	t.pod.Spec.Containers[0].VolumeMounts = append(t.pod.Spec.Containers[0].VolumeMounts, volumeMount)
+
+	kind := v1.AzureDataDiskKind("Managed")
+	diskName, _ := azuredisk.GetDiskName(diskURI)
+	volume := v1.Volume{
+		Name: name,
+		VolumeSource: v1.VolumeSource{
+			AzureDisk: &v1.AzureDiskVolumeSource{
+				DiskName:    diskName,
+				DataDiskURI: diskURI,
+				ReadOnly:    &readOnly,
+				Kind:        &kind,
+			},
+		},
+	}
+	t.pod.Spec.Volumes = append(t.pod.Spec.Volumes, volume)
+}
+
 func (t *TestPod) SetupRawBlockVolume(pvc *v1.PersistentVolumeClaim, name, devicePath string) {
 	volumeDevice := v1.VolumeDevice{
 		Name:       name,
@@ -842,6 +858,30 @@ func (t *TestPod) SetNodeUnschedulable(nodeName string, unschedulable bool) {
 
 func (t *TestPod) Cleanup() {
 	cleanupPodOrFail(t.client, t.pod.Name, t.namespace.Name)
+}
+
+func (t *TestPod) GetZoneForVolume(index int) string {
+	pvcSource := t.pod.Spec.Volumes[index].VolumeSource.PersistentVolumeClaim
+	if pvcSource == nil {
+		return ""
+	}
+
+	pvc, err := t.client.CoreV1().PersistentVolumeClaims(t.namespace.Name).Get(context.TODO(), pvcSource.ClaimName, metav1.GetOptions{})
+	framework.ExpectNoError(err)
+
+	pv, err := t.client.CoreV1().PersistentVolumes().Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
+	framework.ExpectNoError(err)
+
+	zone := ""
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, ex := range term.MatchExpressions {
+			if ex.Key == "topology.disk.csi.azure.com/zone" && ex.Operator == v1.NodeSelectorOpIn {
+				zone = ex.Values[0]
+			}
+		}
+	}
+
+	return zone
 }
 
 func (t *TestPod) Logs() ([]byte, error) {
@@ -896,4 +936,14 @@ func waitForPersistentVolumeClaimDeleted(c clientset.Interface, ns string, pvcNa
 		}
 	}
 	return fmt.Errorf("PersistentVolumeClaim %s is not removed from the system within %v", pvcName, timeout)
+}
+
+func ListNodeNames(c clientset.Interface) []string {
+	var nodeNames []string
+	nodes, err := c.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	framework.ExpectNoError(err)
+	for _, item := range nodes.Items {
+		nodeNames = append(nodeNames, item.ObjectMeta.Name)
+	}
+	return nodeNames
 }

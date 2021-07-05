@@ -22,13 +22,86 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
+	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 )
+
+func (az *Cloud) refreshZones(refreshFunc func() error) {
+	ticker := time.NewTicker(consts.ZoneFetchingInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		_ = refreshFunc()
+	}
+}
+
+func (az *Cloud) syncRegionZonesMap() error {
+	klog.V(2).Infof("refreshZones: starting to fetch all available zones for the subscription %s", az.SubscriptionID)
+	zones, rerr := az.ZoneClient.GetZones(context.Background(), az.SubscriptionID)
+	if rerr != nil {
+		klog.Warningf("refreshZones: error when get zones: %s, will retry after %s", rerr.Error().Error(), consts.ZoneFetchingInterval.String())
+		return rerr.Error()
+	}
+	if len(zones) == 0 {
+		klog.Warningf("refreshZones: empty zone list, will retry after %s", consts.ZoneFetchingInterval.String())
+		return fmt.Errorf("empty zone list")
+	}
+
+	az.updateRegionZonesMap(zones)
+
+	return nil
+}
+
+func (az *Cloud) updateRegionZonesMap(zones map[string][]string) {
+	az.refreshZonesLock.Lock()
+	defer az.refreshZonesLock.Unlock()
+
+	if az.regionZonesMap == nil {
+		az.regionZonesMap = make(map[string][]string)
+	}
+
+	for region, z := range zones {
+		az.regionZonesMap[region] = z
+	}
+}
+
+func (az *Cloud) getRegionZonesBackoff(region string) ([]string, error) {
+	if len(az.regionZonesMap) != 0 {
+		az.refreshZonesLock.RLock()
+		defer az.refreshZonesLock.RUnlock()
+
+		return az.regionZonesMap[region], nil
+	}
+
+	klog.V(2).Infof("getRegionZonesMapWrapper: the region-zones map is not initialized successfully, retrying immediately")
+
+	err := wait.ExponentialBackoff(az.RequestBackoff(), func() (done bool, err error) {
+		zones, rerr := az.ZoneClient.GetZones(context.Background(), az.SubscriptionID)
+		if len(zones) == 0 || rerr != nil {
+			klog.Warningf("getRegionZonesMapWrapper: failed to fetch zones information: %v", rerr.Error())
+			return false, nil
+		}
+
+		az.updateRegionZonesMap(zones)
+		return true, nil
+	})
+
+	if err != nil {
+		return []string{}, fmt.Errorf("cannot get zones information of %s after %d time retry", region, az.RequestBackoff().Steps)
+	}
+
+	az.refreshZonesLock.RLock()
+	defer az.refreshZonesLock.RUnlock()
+
+	return az.regionZonesMap[region], nil
+}
 
 // makeZone returns the zone value in format of <region>-<zone-id>.
 func (az *Cloud) makeZone(location string, zoneID int) string {
@@ -59,7 +132,7 @@ func (az *Cloud) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
 		}
 
 		if metadata.Compute == nil {
-			_ = az.metadata.imsCache.Delete(metadataCacheKey)
+			_ = az.metadata.imsCache.Delete(consts.MetadataCacheKey)
 			return cloudprovider.Zone{}, fmt.Errorf("failure of getting compute information from instance metadata")
 		}
 

@@ -17,7 +17,7 @@ limitations under the License.
 package fileclient
 
 import (
-	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2019-06-01/storage"
+	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2021-02-01/storage"
 )
 
 // Interface is the client interface for creating file shares, interface for test injection.
@@ -27,4 +27,6 @@ type Interface interface {
 	DeleteFileShare(resourceGroupName, accountName, name string) error
 	ResizeFileShare(resourceGroupName, accountName, name string, sizeGiB int) error
 	GetFileShare(resourceGroupName, accountName, name string) (storage.FileShare, error)
+	GetServiceProperties(resourceGroupName, accountName string) (storage.FileServiceProperties, error)
+	SetServiceProperties(resourceGroupName, accountName string, parameters storage.FileServiceProperties) (storage.FileServiceProperties, error)
 }

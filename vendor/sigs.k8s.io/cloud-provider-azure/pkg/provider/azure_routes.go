@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-07-01/network"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2021-02-01/network"
 	"github.com/Azure/go-autorest/autorest/to"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -33,6 +33,7 @@ import (
 	utilnet "k8s.io/utils/net"
 
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
+	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/metrics"
 )
 
@@ -47,9 +48,6 @@ type routeOperation string
 // copied to minimize the number of cross reference
 // and exceptions in publishing and allowed imports.
 const (
-	routeNameFmt       = "%s____%s"
-	routeNameSeparator = "____"
-
 	// Route operations.
 	routeOperationAdd             routeOperation = "add"
 	routeOperationDelete          routeOperation = "delete"
@@ -148,12 +146,17 @@ func (d *delayedRouteUpdater) updateRoutes() {
 	}
 
 	// reconcile routes.
-	dirty := false
+	dirty, onlyUpdateTags := false, true
 	routes := []network.Route{}
-	if routeTable.Routes != nil {
+	if routeTable.RouteTablePropertiesFormat != nil && routeTable.RouteTablePropertiesFormat.Routes != nil {
 		routes = *routeTable.Routes
 	}
-	onlyUpdateTags := true
+
+	routes, dirty = d.cleanupOutdatedRoutes(routes)
+	if dirty {
+		onlyUpdateTags = false
+	}
+
 	for _, rt := range d.routesToUpdate {
 		if rt.operation == routeTableOperationUpdateTags {
 			routeTable.Tags = rt.routeTableTags
@@ -200,7 +203,38 @@ func (d *delayedRouteUpdater) updateRoutes() {
 			klog.Errorf("CreateOrUpdateRouteTable() failed with error: %v", err)
 			return
 		}
+
+		// wait a while for route updates to take effect.
+		time.Sleep(time.Duration(d.az.Config.RouteUpdateWaitingInSeconds) * time.Second)
 	}
+}
+
+// cleanupOutdatedRoutes deletes all non-dualstack routes when dualstack is enabled,
+// and deletes all dualstack routes when dualstack is not enabled.
+func (d *delayedRouteUpdater) cleanupOutdatedRoutes(existingRoutes []network.Route) (routes []network.Route, changed bool) {
+	for i := len(existingRoutes) - 1; i >= 0; i-- {
+		existingRouteName := to.String(existingRoutes[i].Name)
+		split := strings.Split(existingRouteName, consts.RouteNameSeparator)
+
+		// filter out unmanaged routes
+		deleteRoute := false
+		if d.az.nodeNames.Has(split[0]) {
+			if d.az.ipv6DualStackEnabled && len(split) == 1 {
+				klog.V(2).Infof("cleanupOutdatedRoutes: deleting outdated non-dualstack route %s", existingRouteName)
+				deleteRoute = true
+			} else if !d.az.ipv6DualStackEnabled && len(split) == 2 {
+				klog.V(2).Infof("cleanupOutdatedRoutes: deleting outdated dualstack route %s", existingRouteName)
+				deleteRoute = true
+			}
+
+			if deleteRoute {
+				existingRoutes = append(existingRoutes[:i], existingRoutes[i+1:]...)
+				changed = true
+			}
+		}
+	}
+
+	return existingRoutes, changed
 }
 
 // addRouteOperation adds the routeOperation to delayedRouteUpdater and returns a delayedRouteOperation.
@@ -251,7 +285,7 @@ func (az *Cloud) ListRoutes(ctx context.Context, clusterName string) ([]*cloudpr
 		if cidr, ok := az.routeCIDRs[nodeName]; ok {
 			routes = append(routes, &cloudprovider.Route{
 				Name:            nodeName,
-				TargetNode:      mapRouteNameToNodeName(az.ipv6DualStackEnabled, nodeName),
+				TargetNode:      MapRouteNameToNodeName(az.ipv6DualStackEnabled, nodeName),
 				DestinationCIDR: cidr,
 			})
 		}
@@ -291,7 +325,7 @@ func processRoutes(ipv6DualStackEnabled bool, routeTable network.RouteTable, exi
 	if routeTable.RouteTablePropertiesFormat != nil && routeTable.Routes != nil {
 		kubeRoutes = make([]*cloudprovider.Route, len(*routeTable.Routes))
 		for i, route := range *routeTable.Routes {
-			instance := mapRouteNameToNodeName(ipv6DualStackEnabled, *route.Name)
+			instance := MapRouteNameToNodeName(ipv6DualStackEnabled, *route.Name)
 			cidr := *route.AddressPrefix
 			klog.V(10).Infof("ListRoutes: * instance=%q, cidr=%q", instance, cidr)
 
@@ -354,7 +388,7 @@ func (az *Cloud) CreateRoute(ctx context.Context, clusterName string, nameHint s
 		return nil
 	}
 
-	CIDRv6 := utilnet.IsIPv6CIDRString(string(kubeRoute.DestinationCIDR))
+	CIDRv6 := utilnet.IsIPv6CIDRString(kubeRoute.DestinationCIDR)
 	// if single stack IPv4 then get the IP for the primary ip config
 	// single stack IPv6 is supported on dual stack host. So the IPv6 IP is secondary IP for both single stack IPv6 and dual stack
 	// Get all private IPs for the machine and find the first one that matches the IPv6 family
@@ -379,7 +413,7 @@ func (az *Cloud) CreateRoute(ctx context.Context, clusterName string, nameHint s
 			return err
 		}
 	}
-	routeName := mapNodeNameToRouteName(az.ipv6DualStackEnabled, kubeRoute.TargetNode, string(kubeRoute.DestinationCIDR))
+	routeName := mapNodeNameToRouteName(az.ipv6DualStackEnabled, kubeRoute.TargetNode, kubeRoute.DestinationCIDR)
 	route := network.Route{
 		Name: to.StringPtr(routeName),
 		RoutePropertiesFormat: &network.RoutePropertiesFormat{
@@ -434,7 +468,7 @@ func (az *Cloud) DeleteRoute(ctx context.Context, clusterName string, kubeRoute 
 
 	klog.V(2).Infof("DeleteRoute: deleting route. clusterName=%q instance=%q cidr=%q", clusterName, kubeRoute.TargetNode, kubeRoute.DestinationCIDR)
 
-	routeName := mapNodeNameToRouteName(az.ipv6DualStackEnabled, kubeRoute.TargetNode, string(kubeRoute.DestinationCIDR))
+	routeName := mapNodeNameToRouteName(az.ipv6DualStackEnabled, kubeRoute.TargetNode, kubeRoute.DestinationCIDR)
 	route := network.Route{
 		Name:                  to.StringPtr(routeName),
 		RoutePropertiesFormat: &network.RoutePropertiesFormat{},
@@ -458,7 +492,7 @@ func (az *Cloud) DeleteRoute(ctx context.Context, clusterName string, kubeRoute 
 	return nil
 }
 
-// This must be kept in sync with mapRouteNameToNodeName.
+// This must be kept in sync with MapRouteNameToNodeName.
 // These two functions enable stashing the instance name in the route
 // and then retrieving it later when listing. This is needed because
 // Azure does not let you put tags/descriptions on the Route itself.
@@ -466,15 +500,16 @@ func mapNodeNameToRouteName(ipv6DualStackEnabled bool, nodeName types.NodeName, 
 	if !ipv6DualStackEnabled {
 		return string(nodeName)
 	}
-	return fmt.Sprintf(routeNameFmt, nodeName, cidrtoRfc1035(cidr))
+	return fmt.Sprintf(consts.RouteNameFmt, nodeName, cidrtoRfc1035(cidr))
 }
 
-// Used with mapNodeNameToRouteName. See comment on mapNodeNameToRouteName.
-func mapRouteNameToNodeName(ipv6DualStackEnabled bool, routeName string) types.NodeName {
+// MapRouteNameToNodeName is used with mapNodeNameToRouteName.
+// See comment on mapNodeNameToRouteName for detailed usage.
+func MapRouteNameToNodeName(ipv6DualStackEnabled bool, routeName string) types.NodeName {
 	if !ipv6DualStackEnabled {
 		return types.NodeName(routeName)
 	}
-	parts := strings.Split(routeName, routeNameSeparator)
+	parts := strings.Split(routeName, consts.RouteNameSeparator)
 	nodeName := parts[0]
 	return types.NodeName(nodeName)
 
@@ -502,21 +537,18 @@ func cidrtoRfc1035(cidr string) string {
 	return cidr
 }
 
-//  ensureRouteTableTagged ensures the route table is tagged as configured
+// ensureRouteTableTagged ensures the route table is tagged as configured
 func (az *Cloud) ensureRouteTableTagged(rt *network.RouteTable) (map[string]*string, bool) {
 	if az.Tags == "" {
 		return nil, false
 	}
-	changed := false
 	tags := parseTags(az.Tags)
 	if rt.Tags == nil {
 		rt.Tags = make(map[string]*string)
 	}
-	for k, v := range tags {
-		if vv, ok := rt.Tags[k]; !ok || !strings.EqualFold(to.String(v), to.String(vv)) {
-			rt.Tags[k] = v
-			changed = true
-		}
-	}
+
+	tags, changed := az.reconcileTags(rt.Tags, tags)
+	rt.Tags = tags
+
 	return rt.Tags, changed
 }

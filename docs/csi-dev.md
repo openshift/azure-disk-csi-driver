@@ -13,9 +13,20 @@ $ cd $GOPATH/src/sigs.k8s.io/azuredisk-csi-driver
 $ make azuredisk
 ```
 
+ - Build CSI driver v2
+```console
+$ cd $GOPATH/src/sigs.k8s.io/azuredisk-csi-driver
+$ BUILD_V2=1 make azuredisk
+```
+
  - Run verification before sending PR
 ```console
 $ make verify
+```
+
+ - If there is config file changed under `charts` directory, run following command to update chart file
+```console
+helm package charts/latest/azuredisk-csi-driver -d charts/latest/
 ```
 
 ## How to test CSI driver in local environment
@@ -31,7 +42,7 @@ $ make build
 #### Start CSI driver locally
 ```console
 $ cd $GOPATH/src/sigs.k8s.io/azuredisk-csi-driver
-$ ./_output/azurediskplugin --endpoint tcp://127.0.0.1:10000 --nodeid CSINode -v=5 &
+$ ./_output/amd64/azurediskplugin --endpoint tcp://127.0.0.1:10000 --nodeid CSINode -v=5 &
 ```
 > Before running CSI driver, create "/etc/kubernetes/azure.json" file under testing server(it's better copy `azure.json` file from a k8s cluster with service principle configured correctly) and set `AZURE_CREDENTIAL_FILE` as following:
 ```console

@@ -26,12 +26,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const (
-	cloudConfigNamespace  = "kube-system"
-	cloudConfigKey        = "cloud-config"
-	cloudConfigSecretName = "azure-cloud-provider"
-)
-
 // The config type for Azure cloud provider secret. Supported values are:
 // * file   : The values are read from local cloud-config file.
 // * secret : The values from secret would override all configures from local cloud-config file.
@@ -45,21 +39,24 @@ const (
 )
 
 // InitializeCloudFromSecret initializes Azure cloud provider from Kubernetes secret.
-func (az *Cloud) InitializeCloudFromSecret() {
+func (az *Cloud) InitializeCloudFromSecret() error {
 	config, err := az.getConfigFromSecret()
 	if err != nil {
-		klog.Warningf("Failed to get cloud-config from secret: %v, skip initializing from secret", err)
-		return
+		klog.Errorf("Failed to get cloud-config from secret: %v", err)
+		return fmt.Errorf("InitializeCloudFromSecret: failed to get cloud config from secret %s/%s: %w", az.SecretNamespace, az.SecretName, err)
 	}
 
 	if config == nil {
 		// Skip re-initialization if the config is not override.
-		return
+		return nil
 	}
 
-	if err := az.InitializeCloudFromConfig(config, true); err != nil {
+	if err := az.InitializeCloudFromConfig(config, true, true); err != nil {
 		klog.Errorf("Failed to initialize Azure cloud provider: %v", err)
+		return fmt.Errorf("InitializeCloudFromSecret: failed to initialize Azure cloud provider: %w", err)
 	}
+
+	return nil
 }
 
 func (az *Cloud) getConfigFromSecret() (*Config, error) {
@@ -68,14 +65,14 @@ func (az *Cloud) getConfigFromSecret() (*Config, error) {
 		return nil, nil
 	}
 
-	secret, err := az.KubeClient.CoreV1().Secrets(cloudConfigNamespace).Get(context.TODO(), cloudConfigSecretName, metav1.GetOptions{})
+	secret, err := az.KubeClient.CoreV1().Secrets(az.SecretNamespace).Get(context.TODO(), az.SecretName, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get secret %s: %w", cloudConfigSecretName, err)
+		return nil, fmt.Errorf("failed to get secret %s/%s: %w", az.SecretNamespace, az.SecretName, err)
 	}
 
-	cloudConfigData, ok := secret.Data[cloudConfigKey]
+	cloudConfigData, ok := secret.Data[az.CloudConfigKey]
 	if !ok {
-		return nil, fmt.Errorf("cloud-config is not set in the secret (%s)", cloudConfigSecretName)
+		return nil, fmt.Errorf("cloud-config is not set in the secret (%s/%s)", az.SecretNamespace, az.SecretName)
 	}
 
 	config := Config{}

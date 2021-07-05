@@ -16,24 +16,32 @@ PKG = sigs.k8s.io/azuredisk-csi-driver
 GIT_COMMIT ?= $(shell git rev-parse HEAD)
 REGISTRY ?= andyzhangx
 REGISTRY_NAME ?= $(shell echo $(REGISTRY) | sed "s/.azurecr.io//g")
-DRIVER_NAME = disk.csi.azure.com
 IMAGE_NAME ?= azuredisk-csi
-IMAGE_VERSION ?= v1.1.1
+ifndef BUILD_V2
+PLUGIN_NAME = azurediskplugin
+IMAGE_VERSION ?= v1.5.0
+CHART_VERSION ?= latest
+else
+PLUGIN_NAME = azurediskpluginv2
+IMAGE_VERSION ?= v2.0.0-alpha.1
+CHART_VERSION ?= v2.0.0-alpha.1
+GOTAGS += -tags azurediskv2
+endif
 CLOUD ?= AzurePublicCloud
 # Use a custom version for E2E tests if we are testing in CI
 ifdef CI
 ifndef PUBLISH
-override IMAGE_VERSION := e2e-$(GIT_COMMIT)
+override IMAGE_VERSION := $(IMAGE_VERSION)-$(GIT_COMMIT)
 endif
 endif
 IMAGE_TAG ?= $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_VERSION)
 IMAGE_TAG_LATEST = $(REGISTRY)/$(IMAGE_NAME):latest
 REV = $(shell git describe --long --tags --dirty)
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-TOPOLOGY_KEY = topology.$(DRIVER_NAME)/zone
 ENABLE_TOPOLOGY ?= false
-LDFLAGS ?= "-X ${PKG}/pkg/azuredisk.driverVersion=${IMAGE_VERSION} -X ${PKG}/pkg/azuredisk.gitCommit=${GIT_COMMIT} -X ${PKG}/pkg/azuredisk.buildDate=${BUILD_DATE} -X ${PKG}/pkg/azuredisk.DriverName=${DRIVER_NAME} -X ${PKG}/pkg/azuredisk.topologyKey=${TOPOLOGY_KEY} -extldflags "-static""
+LDFLAGS ?= "-X ${PKG}/pkg/azuredisk.driverVersion=${IMAGE_VERSION} -X ${PKG}/pkg/azuredisk.gitCommit=${GIT_COMMIT} -X ${PKG}/pkg/azuredisk.buildDate=${BUILD_DATE} -extldflags "-static"" ${GOTAGS}
 E2E_HELM_OPTIONS ?= --set image.azuredisk.repository=$(REGISTRY)/$(IMAGE_NAME) --set image.azuredisk.tag=$(IMAGE_VERSION) --set image.azuredisk.pullPolicy=Always
+E2E_HELM_OPTIONS += ${EXTRA_HELM_OPTIONS}
 GINKGO_FLAGS = -ginkgo.v
 ifeq ($(ENABLE_TOPOLOGY), true)
 GINKGO_FLAGS += -ginkgo.focus="\[multi-az\]"
@@ -48,7 +56,7 @@ export GOPATH GOBIN GO111MODULE DOCKER_CLI_EXPERIMENTAL
 
 # Generate all combination of all OS, ARCH, and OSVERSIONS for iteration
 ALL_OS = linux windows
-ALL_ARCH.linux = amd64
+ALL_ARCH.linux = amd64 arm64
 ALL_OS_ARCH.linux = $(foreach arch, ${ALL_ARCH.linux}, linux-$(arch))
 ALL_ARCH.windows = amd64
 ALL_OSVERSIONS.windows := 1809 1903 1909 2004
@@ -70,6 +78,7 @@ all: azuredisk
 verify: unit-test
 	hack/verify-all.sh
 	go vet ./pkg/...
+	go build -o _output/${ARCH}/gen-disk-skus-map ./pkg/tool/
 
 .PHONY: unit-test
 unit-test: unit-test-v1 unit-test-v2
@@ -98,25 +107,21 @@ integration-test: azuredisk
 integration-test-v2: azuredisk-v2
 	go test -v -timeout=30m ./test/integration --temp-use-driver-v2
 
-.PHONY: e2e-test
-e2e-test:
-	go test -v -timeout=0 ./test/e2e ${GINKGO_FLAGS}
-
 .PHONY: e2e-bootstrap
 e2e-bootstrap: install-helm
 	docker pull $(IMAGE_TAG) || make container-all push-manifest
 ifdef TEST_WINDOWS
-	helm install azuredisk-csi-driver charts/latest/azuredisk-csi-driver --namespace kube-system --wait --timeout=15m -v=5 --debug \
+	helm install azuredisk-csi-driver charts/${CHART_VERSION}/azuredisk-csi-driver --namespace kube-system --wait --timeout=15m -v=5 --debug \
 		${E2E_HELM_OPTIONS} \
 		--set windows.enabled=true \
 		--set linux.enabled=false \
 		--set controller.runOnMaster=true \
 		--set controller.replicas=1 \
 		--set controller.logLevel=6 \
-		--set node.logLevel=6
+		--set node.logLevel=6 \
 		--set cloud=$(CLOUD)
 else
-	helm install azuredisk-csi-driver charts/latest/azuredisk-csi-driver --namespace kube-system --wait --timeout=15m -v=5 --debug \
+	helm install azuredisk-csi-driver charts/${CHART_VERSION}/azuredisk-csi-driver --namespace kube-system --wait --timeout=15m -v=5 --debug \
 		${E2E_HELM_OPTIONS} \
 		--set snapshot.enabled=true \
 		--set cloud=$(CLOUD)
@@ -132,19 +137,23 @@ e2e-teardown:
 
 .PHONY: azuredisk
 azuredisk:
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/azurediskplugin ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME} ./pkg/azurediskplugin
 
 .PHONY: azuredisk-v2
 azuredisk-v2:
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${LDFLAGS} -mod vendor -tags azurediskv2 -o _output/azurediskpluginv2 ./pkg/azurediskplugin
+	BUILD_V2=1 $(MAKE) azuredisk
 
 .PHONY: azuredisk-windows
 azuredisk-windows:
-	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/azurediskplugin.exe ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME}.exe ./pkg/azurediskplugin
+
+.PHONY: azuredisk-windows-v2
+azuredisk-windows-v2:
+	BUILD_V2=1 $(MAKE) azuredisk
 
 .PHONY: azuredisk-darwin
 azuredisk-darwin:
-	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/azurediskplugin ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME}.exe ./pkg/azurediskplugin
 
 .PHONY: container
 container: azuredisk
@@ -152,22 +161,42 @@ container: azuredisk
 
 .PHONY: container-linux
 container-linux:
-	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="linux/$(ARCH)" \
-		-t $(IMAGE_TAG)-linux-$(ARCH) -f ./pkg/azurediskplugin/Dockerfile .
+	docker buildx build . \
+		--pull \
+		--output=type=$(OUTPUT_TYPE) \
+		--tag $(IMAGE_TAG)-linux-$(ARCH) \
+		--file ./pkg/azurediskplugin/Dockerfile \
+		--platform="linux/$(ARCH)" \
+		--build-arg ARCH=${ARCH} \
+		--build-arg PLUGIN_NAME=${PLUGIN_NAME}
 
 .PHONY: container-windows
 container-windows:
-	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="windows/$(ARCH)" \
-		 -t $(IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) --build-arg OSVERSION=$(OSVERSION) -f ./pkg/azurediskplugin/Windows.Dockerfile .
+	docker buildx build . \
+		--pull \
+		--output=type=$(OUTPUT_TYPE) \
+		--platform="windows/$(ARCH)" \
+		--tag $(IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) \
+		--file ./pkg/azurediskplugin/Windows.Dockerfile \
+		--build-arg ARCH=${ARCH} \
+		--build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+		--build-arg OSVERSION=$(OSVERSION) 
 
 .PHONY: container-all
-container-all: azuredisk azuredisk-windows
+container-all: azuredisk-windows
 	docker buildx rm container-builder || true
 	docker buildx create --use --name=container-builder
 ifeq ($(CLOUD), AzureStackCloud)
 	docker run --privileged --name buildx_buildkit_container-builder0 -d --mount type=bind,src=/etc/ssl/certs,dst=/etc/ssl/certs moby/buildkit:latest || true
 endif
-	$(MAKE) container-linux
+	# enable qemu for arm64 build
+	# https://github.com/docker/buildx/issues/464#issuecomment-741507760
+	docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-aarch64
+	docker run --rm --privileged tonistiigi/binfmt --install all
+	for arch in $(ALL_ARCH.linux); do \
+		ARCH=$${arch} $(MAKE) azuredisk; \
+		ARCH=$${arch} $(MAKE) container-linux; \
+	done
 	for osversion in $(ALL_OSVERSIONS.windows); do \
 		OSVERSION=$${osversion} $(MAKE) container-windows; \
 	done
@@ -213,3 +242,11 @@ create-metrics-svc:
 .PHONY: delete-metrics-svc
 delete-metrics-svc:
 	kubectl delete -f deploy/example/metrics/csi-azuredisk-controller-svc.yaml --ignore-not-found
+
+.PHONY: e2e-test
+e2e-test:
+	if [ ! -z "$(EXTERNAL_E2E_TEST)" ]; then \
+		bash ./test/external-e2e/run.sh;\
+	else \
+		go test -v -timeout=0 ./test/e2e ${GINKGO_FLAGS};\
+	fi

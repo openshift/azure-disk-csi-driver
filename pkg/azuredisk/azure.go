@@ -19,7 +19,6 @@ package azuredisk
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 
 	"k8s.io/client-go/kubernetes"
@@ -27,6 +26,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
 
@@ -51,11 +51,19 @@ func GetCloudProvider(kubeconfig string) (*azure.Cloud, error) {
 		}
 	}
 
-	az := &azure.Cloud{}
+	az := &azure.Cloud{
+		InitSecretConfig: azure.InitSecretConfig{
+			SecretName:      "azure-cloud-provider",
+			SecretNamespace: "kube-system",
+			CloudConfigKey:  "cloud-config",
+		},
+	}
 	if kubeClient != nil {
 		klog.V(2).Infof("reading cloud config from secret")
 		az.KubeClient = kubeClient
-		az.InitializeCloudFromSecret()
+		if err := az.InitializeCloudFromSecret(); err != nil {
+			klog.V(2).Infof("InitializeCloudFromSecret failed with error: %v", err)
+		}
 	}
 
 	if az.TenantID == "" || az.SubscriptionID == "" || az.ResourceGroup == "" {
@@ -64,7 +72,7 @@ func GetCloudProvider(kubeconfig string) (*azure.Cloud, error) {
 		if ok && strings.TrimSpace(credFile) != "" {
 			klog.V(2).Infof("%s env var set as %v", DefaultAzureCredentialFileEnv, credFile)
 		} else {
-			if runtime.GOOS == "windows" {
+			if util.IsWindowsOS() {
 				credFile = DefaultCredFilePathWindows
 			} else {
 				credFile = DefaultCredFilePathLinux
@@ -73,15 +81,16 @@ func GetCloudProvider(kubeconfig string) (*azure.Cloud, error) {
 			klog.V(2).Infof("use default %s env var: %v", DefaultAzureCredentialFileEnv, credFile)
 		}
 
-		f, err := os.Open(credFile)
+		var config *os.File
+		config, err = os.Open(credFile)
 		if err != nil {
-			klog.Errorf("Failed to load config from file: %s", credFile)
-			return nil, fmt.Errorf("Failed to load config from file: %s, cloud not get azure cloud provider", credFile)
+			klog.Errorf("load azure config from file(%s) failed with %v", credFile, err)
+			return nil, fmt.Errorf("load azure config from file(%s) failed with %v", credFile, err)
 		}
-		defer f.Close()
+		defer config.Close()
 
 		klog.V(2).Infof("read cloud config from file: %s successfully", credFile)
-		if az, err = azure.NewCloudWithoutFeatureGates(f); err != nil {
+		if az, err = azure.NewCloudWithoutFeatureGates(config, false); err != nil {
 			return az, err
 		}
 	}

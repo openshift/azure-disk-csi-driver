@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM k8s.gcr.io/build-image/debian-base-amd64:v2.1.3
-COPY ./_output/azurediskplugin /azurediskplugin
+ARG ARCH
+FROM k8s.gcr.io/build-image/debian-base:buster-v1.6.0
 RUN clean-install util-linux e2fsprogs mount ca-certificates udev xfsprogs
 
 LABEL maintainers="andyzhangx"
 LABEL description="Azure Disk CSI Driver"
 
+ARG ARCH
+ARG PLUGIN_NAME=azurediskplugin
+COPY ./_output/${ARCH}/${PLUGIN_NAME} /azurediskplugin
 ENTRYPOINT ["/azurediskplugin"]

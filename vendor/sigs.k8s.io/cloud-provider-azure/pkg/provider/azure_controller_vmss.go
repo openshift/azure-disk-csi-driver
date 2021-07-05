@@ -20,17 +20,18 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-30/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
 	"github.com/Azure/go-autorest/autorest/to"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
+	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 )
 
 // AttachDisk attaches a disk to vm
-func (ss *scaleSet) AttachDisk(nodeName types.NodeName, diskMap map[string]*AttachDiskOptions) error {
+func (ss *ScaleSet) AttachDisk(nodeName types.NodeName, diskMap map[string]*AttachDiskOptions) error {
 	vmName := mapNodeNameToVMName(nodeName)
 	ssName, instanceID, vm, err := ss.getVmssVM(vmName, azcache.CacheReadTypeDefault)
 	if err != nil {
@@ -81,7 +82,7 @@ func (ss *scaleSet) AttachDisk(nodeName types.NodeName, diskMap map[string]*Atta
 				compute.DataDisk{
 					Name:                    &opt.diskName,
 					Lun:                     &opt.lun,
-					Caching:                 compute.CachingTypes(opt.cachingMode),
+					Caching:                 opt.cachingMode,
 					CreateOption:            "attach",
 					ManagedDisk:             managedDisk,
 					WriteAcceleratorEnabled: to.BoolPtr(opt.writeAcceleratorEnabled),
@@ -94,7 +95,7 @@ func (ss *scaleSet) AttachDisk(nodeName types.NodeName, diskMap map[string]*Atta
 						URI: &diskURI,
 					},
 					Lun:          &opt.lun,
-					Caching:      compute.CachingTypes(opt.cachingMode),
+					Caching:      opt.cachingMode,
 					CreateOption: "attach",
 				})
 		}
@@ -136,7 +137,7 @@ func (ss *scaleSet) AttachDisk(nodeName types.NodeName, diskMap map[string]*Atta
 }
 
 // DetachDisk detaches a disk from VM
-func (ss *scaleSet) DetachDisk(nodeName types.NodeName, diskMap map[string]string) error {
+func (ss *ScaleSet) DetachDisk(nodeName types.NodeName, diskMap map[string]string) error {
 	vmName := mapNodeNameToVMName(nodeName)
 	ssName, instanceID, vm, err := ss.getVmssVM(vmName, azcache.CacheReadTypeDefault)
 	if err != nil {
@@ -161,11 +162,7 @@ func (ss *scaleSet) DetachDisk(nodeName types.NodeName, diskMap map[string]strin
 				(disk.ManagedDisk != nil && diskURI != "" && strings.EqualFold(*disk.ManagedDisk.ID, diskURI)) {
 				// found the disk
 				klog.V(2).Infof("azureDisk - detach disk: name %q uri %q", diskName, diskURI)
-				if strings.EqualFold(ss.cloud.Environment.Name, AzureStackCloudName) && !ss.Config.DisableAzureStackCloud {
-					disks = append(disks[:i], disks[i+1:]...)
-				} else {
-					disks[i].ToBeDetached = to.BoolPtr(true)
-				}
+				disks[i].ToBeDetached = to.BoolPtr(true)
 				bFoundDisk = true
 			}
 		}
@@ -174,6 +171,17 @@ func (ss *scaleSet) DetachDisk(nodeName types.NodeName, diskMap map[string]strin
 	if !bFoundDisk {
 		// only log here, next action is to update VM status with original meta data
 		klog.Errorf("detach azure disk on node(%s): disk list(%s) not found", nodeName, diskMap)
+	} else {
+		if strings.EqualFold(ss.cloud.Environment.Name, consts.AzureStackCloudName) && !ss.Config.DisableAzureStackCloud {
+			// Azure stack does not support ToBeDetached flag, use original way to detach disk
+			newDisks := []compute.DataDisk{}
+			for _, disk := range disks {
+				if !to.Bool(disk.ToBeDetached) {
+					newDisks = append(newDisks, disk)
+				}
+			}
+			disks = newDisks
+		}
 	}
 
 	newVM := compute.VirtualMachineScaleSetVM{
@@ -211,16 +219,47 @@ func (ss *scaleSet) DetachDisk(nodeName types.NodeName, diskMap map[string]strin
 	return nil
 }
 
+// UpdateVM updates a vm
+func (ss *ScaleSet) UpdateVM(nodeName types.NodeName) error {
+	vmName := mapNodeNameToVMName(nodeName)
+	ssName, instanceID, _, err := ss.getVmssVM(vmName, azcache.CacheReadTypeDefault)
+	if err != nil {
+		return err
+	}
+
+	nodeResourceGroup, err := ss.GetNodeResourceGroup(vmName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := getContextWithCancel()
+	defer cancel()
+
+	// Invalidate the cache right after updating
+	defer func() {
+		_ = ss.deleteCacheForNode(vmName)
+	}()
+
+	klog.V(2).Infof("azureDisk - update(%s): vm(%s)", nodeResourceGroup, nodeName)
+	rerr := ss.VirtualMachineScaleSetVMsClient.Update(ctx, nodeResourceGroup, ssName, instanceID, compute.VirtualMachineScaleSetVM{}, "update_vmss_instance")
+
+	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - returned with %v", nodeResourceGroup, nodeName, rerr)
+	if rerr != nil {
+		return rerr.Error()
+	}
+	return nil
+}
+
 // GetDataDisks gets a list of data disks attached to the node.
-func (ss *scaleSet) GetDataDisks(nodeName types.NodeName, crt azcache.AzureCacheReadType) ([]compute.DataDisk, error) {
+func (ss *ScaleSet) GetDataDisks(nodeName types.NodeName, crt azcache.AzureCacheReadType) ([]compute.DataDisk, *string, error) {
 	_, _, vm, err := ss.getVmssVM(string(nodeName), crt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if vm.StorageProfile == nil || vm.StorageProfile.DataDisks == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	return *vm.StorageProfile.DataDisks, nil
+	return *vm.StorageProfile.DataDisks, vm.ProvisioningState, nil
 }

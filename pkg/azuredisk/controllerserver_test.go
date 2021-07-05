@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-30/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/mock/gomock"
 
@@ -298,6 +298,24 @@ func TestCreateVolume(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid perf profile",
+			testFunc: func(t *testing.T) {
+				d, _ := NewFakeDriver(t)
+				mp := make(map[string]string)
+				mp[perfProfileField] = "blah"
+				req := &csi.CreateVolumeRequest{
+					Name:               "unit-test",
+					VolumeCapabilities: stdVolumeCapabilities,
+					Parameters:         mp,
+				}
+				_, err := d.CreateVolume(context.Background(), req)
+				expectedErr := status.Error(codes.InvalidArgument, "Perf profile blah is not supported. Supported tuning modes are none and basic.")
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
 			name: "Volume capability not supported ",
 			testFunc: func(t *testing.T) {
 				d, _ := NewFakeDriver(t)
@@ -305,7 +323,6 @@ func TestCreateVolume(t *testing.T) {
 				mp[maxSharesField] = "1"
 				mp[skuNameField] = "ut"
 				mp[locationField] = "ut"
-				mp[storageAccountField] = "ut"
 				mp[storageAccountTypeField] = "ut"
 				mp[resourceGroupField] = "ut"
 				mp[diskIOPSReadWriteField] = "ut"
@@ -337,7 +354,7 @@ func TestCreateVolume(t *testing.T) {
 					Parameters:         mp,
 				}
 				_, err := d.CreateVolume(context.Background(), req)
-				expectedErr := fmt.Errorf("azureDisk - NOT_EXISTING is not supported sku/storageaccounttype. Supported values are [Premium_LRS Standard_LRS StandardSSD_LRS UltraSSD_LRS]")
+				expectedErr := fmt.Errorf("azureDisk - NOT_EXISTING is not supported sku/storageaccounttype. Supported values are [Premium_LRS Premium_ZRS Standard_LRS StandardSSD_LRS StandardSSD_ZRS UltraSSD_LRS]")
 				if !reflect.DeepEqual(err, expectedErr) {
 					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
 				}
@@ -424,7 +441,6 @@ func TestCreateVolume(t *testing.T) {
 			testFunc: func(t *testing.T) {
 				d, _ := NewFakeDriver(t)
 				mp := make(map[string]string)
-				mp["unit-test"] = "unit=test"
 				volumeContentSourceSnapshotSource := &csi.VolumeContentSource_Snapshot{}
 				volumecontensource := csi.VolumeContentSource{
 					Type: volumeContentSourceSnapshotSource,
@@ -451,7 +467,7 @@ func TestCreateVolume(t *testing.T) {
 			},
 		},
 		{
-			name: "valid request ",
+			name: "valid request",
 			testFunc: func(t *testing.T) {
 				d, _ := NewFakeDriver(t)
 				stdCapacityRangetest := &csi.CapacityRange{
@@ -478,6 +494,27 @@ func TestCreateVolume(t *testing.T) {
 				d.getCloud().DisksClient.(*mockdiskclient.MockInterface).EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 				_, err := d.CreateVolume(context.Background(), req)
 				expectedErr := error(nil)
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
+			name: "invalid parameter",
+			testFunc: func(t *testing.T) {
+				d, _ := NewFakeDriver(t)
+				stdCapacityRangetest := &csi.CapacityRange{
+					RequiredBytes: volumehelper.GiBToBytes(10),
+					LimitBytes:    volumehelper.GiBToBytes(15),
+				}
+				req := &csi.CreateVolumeRequest{
+					Name:               testVolumeName,
+					VolumeCapabilities: stdVolumeCapabilities,
+					CapacityRange:      stdCapacityRangetest,
+					Parameters:         map[string]string{"invalidparameter": "value"},
+				}
+				_, err := d.CreateVolume(context.Background(), req)
+				expectedErr := fmt.Errorf("invalid parameter %s in storage class", "invalidparameter")
 				if !reflect.DeepEqual(err, expectedErr) {
 					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
 				}
@@ -1620,6 +1657,23 @@ func TestListVolumes(t *testing.T) {
 			},
 		},
 		{
+			name: "When KubeClient exists, Empty list without start token should not return error",
+			testFunc: func(t *testing.T) {
+				req := csi.ListVolumesRequest{}
+				d := getFakeDriverWithKubeClient(t)
+				pvList := v1.PersistentVolumeList{
+					Items: []v1.PersistentVolume{},
+				}
+				d.getCloud().KubeClient.CoreV1().PersistentVolumes().(*mockpersistentvolume.MockInterface).EXPECT().List(gomock.Any(), gomock.Any()).Return(&pvList, nil)
+				d.getCloud().DisksClient.(*mockdiskclient.MockInterface).EXPECT().ListByResourceGroup(gomock.Any(), gomock.Any()).Return([]compute.Disk{}, nil)
+				expectedErr := error(nil)
+				_, err := d.ListVolumes(context.TODO(), &req)
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
 			name: "When KubeClient exists, Valid list without max_entries or starting_token",
 			testFunc: func(t *testing.T) {
 				req := csi.ListVolumesRequest{}
@@ -1884,6 +1938,50 @@ func TestPickAvailabilityZone(t *testing.T) {
 				region := "test"
 				mp := make(map[string]string)
 				mp["N/A"] = "test-01"
+				topology := &csi.Topology{
+					Segments: mp,
+				}
+				topologies := []*csi.Topology{}
+				topologies = append(topologies, topology)
+				req := &csi.TopologyRequirement{
+					Requisite: topologies,
+				}
+				actualresponse := pickAvailabilityZone(req, region)
+				if !reflect.DeepEqual(expectedresponse, actualresponse) {
+					t.Errorf("actualresponse: (%v), expectedresponse: (%v)", actualresponse, expectedresponse)
+				}
+			},
+		},
+		{
+			name: "valid get preferred - WellKnownTopologyKey",
+			testFunc: func(t *testing.T) {
+				expectedresponse := "test-02"
+				region := "test"
+				mp := make(map[string]string)
+				mp["N/A"] = "test-01"
+				mp[WellKnownTopologyKey] = "test-02"
+				topology := &csi.Topology{
+					Segments: mp,
+				}
+				topologies := []*csi.Topology{}
+				topologies = append(topologies, topology)
+				req := &csi.TopologyRequirement{
+					Preferred: topologies,
+				}
+				actualresponse := pickAvailabilityZone(req, region)
+				if !reflect.DeepEqual(expectedresponse, actualresponse) {
+					t.Errorf("actualresponse: (%v), expectedresponse: (%v)", actualresponse, expectedresponse)
+				}
+			},
+		},
+		{
+			name: "valid get requisite - WellKnownTopologyKey",
+			testFunc: func(t *testing.T) {
+				expectedresponse := "test-02"
+				region := "test"
+				mp := make(map[string]string)
+				mp["N/A"] = "test-01"
+				mp[WellKnownTopologyKey] = "test-02"
 				topology := &csi.Topology{
 					Segments: mp,
 				}

@@ -26,7 +26,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-30/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 
 	"google.golang.org/grpc/codes"
@@ -39,6 +39,7 @@ import (
 	volerr "k8s.io/cloud-provider/volume/errors"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	volumehelper "sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	"sigs.k8s.io/cloud-provider-azure/pkg/metrics"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
@@ -93,6 +94,7 @@ func (d *DriverV2) CreateVolume(ctx context.Context, req *csi.CreateVolumeReques
 		maxShares               int
 	)
 
+	tags := make(map[string]string)
 	parameters := req.GetParameters()
 	if parameters == nil {
 		parameters = make(map[string]string)
@@ -134,9 +136,23 @@ func (d *DriverV2) CreateVolume(ctx context.Context, req *csi.CreateVolumeReques
 			if maxShares < 1 {
 				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("parse %s returned with invalid value: %d", v, maxShares))
 			}
+		case pvcNameKey:
+			tags[pvcNameTag] = v
+		case pvcNamespaceKey:
+			tags[pvcNamespaceTag] = v
+		case pvNameKey:
+			tags[pvNameTag] = v
+		case fsTypeField:
+			// no op, only used in NodeStageVolume
+		case kindField:
+			// fix csi migration issue: https://github.com/kubernetes/kubernetes/issues/103433
+			parameters[kindField] = string(v1.AzureManagedDisk)
+		case perfProfileField:
+			if !optimization.IsValidPerfProfile(v) {
+				return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Perf profile %s is not supported. Supported tuning modes are none and basic.", v))
+			}
 		default:
-			//don't return error here since there are some parameters(e.g. fsType) used in disk mount process
-			//return nil, fmt.Errorf("AzureDisk - invalid option %s in storage class", k)
+			return nil, fmt.Errorf("invalid parameter %s in storage class", k)
 		}
 	}
 
@@ -195,12 +211,10 @@ func (d *DriverV2) CreateVolume(ctx context.Context, req *csi.CreateVolumeReques
 	klog.V(2).Infof("begin to create azure disk(%s) account type(%s) rg(%s) location(%s) size(%d) selectedAvailabilityZone(%v) maxShares(%d)",
 		diskName, skuName, resourceGroup, location, requestGiB, selectedAvailabilityZone, maxShares)
 
-	tags := make(map[string]string)
 	contentSource := &csi.VolumeContentSource{}
 	for k, v := range customTagsMap {
 		tags[k] = v
 	}
-	tags[CreatedForPVNameKey] = name
 
 	if strings.EqualFold(writeAcceleratorEnabled, "true") {
 		tags[azure.WriteAcceleratorEnabled] = "true"
@@ -238,6 +252,7 @@ func (d *DriverV2) CreateVolume(ctx context.Context, req *csi.CreateVolumeReques
 		}
 	}
 
+	parameters[requestedSizeGib] = strconv.Itoa(requestGiB)
 	volumeOptions := &azure.ManagedDiskOptions{
 		DiskName:            diskName,
 		StorageAccountType:  skuName,
@@ -337,7 +352,7 @@ func (d *DriverV2) ControllerPublishVolume(ctx context.Context, req *csi.Control
 		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
 	}
 
-	err := d.checkDiskExists(ctx, diskURI)
+	disk, err := d.checkDiskExists(ctx, diskURI)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume not found, failed with error: %v", err))
 	}
@@ -361,12 +376,18 @@ func (d *DriverV2) ControllerPublishVolume(ctx context.Context, req *csi.Control
 
 	klog.V(2).Infof("GetDiskLun returned: %v. Initiating attaching volume %q to node %q.", err, diskURI, nodeName)
 
-	lun, err := d.cloud.GetDiskLun(diskName, diskURI, nodeName)
+	lun, vmState, err := d.cloud.GetDiskLun(diskName, diskURI, nodeName)
 	if err == cloudprovider.InstanceNotFound {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("failed to get azure instance id for node %q (%v)", nodeName, err))
 	}
 
 	if err == nil {
+		if vmState != nil && strings.ToLower(*vmState) == "failed" {
+			klog.Warningf("VM(%q) is in failed state, update VM first", nodeName)
+			if err := d.cloud.UpdateVM(nodeName); err != nil {
+				return nil, fmt.Errorf("update instance %q failed with %v", nodeName, err)
+			}
+		}
 		// Volume is already attached to node.
 		klog.V(2).Infof("Attach operation is successful. volume %q is already attached to node %q at lun %d.", diskURI, nodeName, lun)
 	} else {
@@ -376,7 +397,7 @@ func (d *DriverV2) ControllerPublishVolume(ctx context.Context, req *csi.Control
 		}
 		klog.V(2).Infof("Trying to attach volume %q to node %q", diskURI, nodeName)
 
-		lun, err = d.cloud.AttachDisk(true, diskName, diskURI, nodeName, cachingMode)
+		lun, err = d.cloud.AttachDisk(true, diskName, diskURI, nodeName, cachingMode, disk)
 		if err == nil {
 			klog.V(2).Infof("Attach operation successful: volume %q attached to node %q.", diskURI, nodeName)
 		} else {
@@ -386,7 +407,7 @@ func (d *DriverV2) ControllerPublishVolume(ctx context.Context, req *csi.Control
 					return nil, status.Errorf(codes.Internal, "Could not detach volume %q from node %q: %v", diskURI, derr.CurrentNode, err)
 				}
 				klog.V(2).Infof("Trying to attach volume %q to node %q again", diskURI, nodeName)
-				lun, err = d.cloud.AttachDisk(true, diskName, diskURI, nodeName, cachingMode)
+				lun, err = d.cloud.AttachDisk(true, diskName, diskURI, nodeName, cachingMode, disk)
 			}
 			if err != nil {
 				klog.Errorf("Attach volume %q to instance %q failed with %v", diskURI, nodeName, err)
@@ -450,8 +471,7 @@ func (d *DriverV2) ValidateVolumeCapabilities(ctx context.Context, req *csi.Vali
 		return nil, status.Error(codes.InvalidArgument, "Volume capabilities missing in request")
 	}
 
-	err := d.checkDiskExists(ctx, diskURI)
-	if err != nil {
+	if _, err := d.checkDiskExists(ctx, diskURI); err != nil {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume not found, failed with error: %v", err))
 	}
 
@@ -507,7 +527,7 @@ func (d *DriverV2) listVolumesInCluster(ctx context.Context, start, maxEntries i
 	rgMap := make(map[string]bool)
 	volSet := make(map[string]bool)
 	for _, pv := range pvList.Items {
-		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == DriverName {
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == d.Name {
 			diskURI := pv.Spec.CSI.VolumeHandle
 			if err := isValidDiskURI(diskURI); err != nil {
 				klog.Warningf("invalid disk uri (%s) with error(%v)", diskURI, err)
@@ -561,7 +581,7 @@ func (d *DriverV2) listVolumesInCluster(ctx context.Context, start, maxEntries i
 		isCompleteRun = isCompleteRun && listStatus.isCompleteRun
 	}
 	// if start was not found, start token was greater than total number of disks
-	if !startFound {
+	if start > 0 && !startFound {
 		return nil, status.Errorf(codes.FailedPrecondition, "ListVolumes starting token(%d) is greater than total number of disks", start)
 	}
 
@@ -740,11 +760,6 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 		return nil, status.Error(codes.InvalidArgument, "snapshot name must be provided")
 	}
 
-	if acquired := d.volumeLocks.TryAcquire(sourceVolumeID); !acquired {
-		return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, sourceVolumeID)
-	}
-	defer d.volumeLocks.Release(sourceVolumeID)
-
 	snapshotName = getValidDiskName(snapshotName)
 
 	var customTags string
@@ -770,7 +785,7 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	}
 
 	if IsAzureStackCloud(d.cloud.Config.Cloud, d.cloud.Config.DisableAzureStackCloud) {
-		klog.V(2).Info("Use full snapshot instead as Azure Stack does not incremental snapshot.")
+		klog.V(2).Info("Use full snapshot instead as Azure Stack does not support incremental snapshot.")
 		incremental = false
 	}
 
