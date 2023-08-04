@@ -63,44 +63,17 @@ type NodeProvider interface {
 	GetPlatformSubFaultDomain() (string, error)
 }
 
-// labelReconcile holds information about a label to reconcile and how to reconcile it.
+// labelReconcileInfo lists Node labels to reconcile, and how to reconcile them.
 // primaryKey and secondaryKey are keys of labels to reconcile.
 // - If both keys exist, but their values don't match. Use the value from the
 // primaryKey as the source of truth to reconcile.
 // - If ensureSecondaryExists is true, and the secondaryKey does not
 // exist, secondaryKey will be added with the value of the primaryKey.
-type labelReconcile struct {
+var labelReconcileInfo = []struct {
 	primaryKey            string
 	secondaryKey          string
 	ensureSecondaryExists bool
-}
-
-// betaToplogyLabels lists beta topology labels that are deprecated and will
-// be removed in a future release.
-// For now we reconcile them optionally onto nodes.
-var betaToplogyLabels = []labelReconcile{
-	{
-		// Reconcile the beta and the GA zone label using the GA label as
-		// the source of truth
-		primaryKey:            v1.LabelZoneFailureDomainStable,
-		secondaryKey:          v1.LabelZoneFailureDomain,
-		ensureSecondaryExists: true,
-	},
-	{
-		// Reconcile the beta and the stable region label using the GA label as
-		// the source of truth
-		primaryKey:            v1.LabelZoneRegionStable,
-		secondaryKey:          v1.LabelZoneRegion,
-		ensureSecondaryExists: true,
-	},
-	{
-		// Reconcile the beta and the stable instance-type label using the GA label as
-		// the source of truth
-		primaryKey:            v1.LabelInstanceTypeStable,
-		secondaryKey:          v1.LabelInstanceType,
-		ensureSecondaryExists: true,
-	},
-}
+}{}
 
 // UpdateNodeSpecBackoff is the back configure for node update.
 var UpdateNodeSpecBackoff = wait.Backoff{
@@ -130,10 +103,6 @@ type CloudNodeController struct {
 	recorder      record.EventRecorder
 
 	nodeStatusUpdateFrequency time.Duration
-
-	labelReconcileInfo []labelReconcile
-
-	enableBetaTopologyLabels bool
 }
 
 // NewCloudNodeController creates a CloudNodeController object
@@ -143,7 +112,7 @@ func NewCloudNodeController(
 	kubeClient clientset.Interface,
 	nodeProvider NodeProvider,
 	nodeStatusUpdateFrequency time.Duration,
-	waitForRoutes, enableBetaTopologyLabels bool) *CloudNodeController {
+	waitForRoutes bool) *CloudNodeController {
 
 	eventBroadcaster := record.NewBroadcaster()
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"})
@@ -163,12 +132,6 @@ func NewCloudNodeController(
 		nodeProvider:              nodeProvider,
 		waitForRoutes:             waitForRoutes,
 		nodeStatusUpdateFrequency: nodeStatusUpdateFrequency,
-		enableBetaTopologyLabels:  enableBetaTopologyLabels,
-	}
-
-	// Only reconcile the beta toplogy labels when the feature flag is enabled.
-	if cnc.enableBetaTopologyLabels {
-		cnc.labelReconcileInfo = append(cnc.labelReconcileInfo, betaToplogyLabels...)
 	}
 
 	// Use shared informer to listen to add/update of nodes. Note that any nodes
@@ -227,7 +190,7 @@ func (cnc *CloudNodeController) reconcileNodeLabels(node *v1.Node) error {
 	}
 
 	labelsToUpdate := map[string]string{}
-	for _, r := range cnc.labelReconcileInfo {
+	for _, r := range labelReconcileInfo {
 		primaryValue, primaryExists := node.Labels[r.primaryKey]
 		secondaryValue, secondaryExists := node.Labels[r.secondaryKey]
 
@@ -482,49 +445,51 @@ func (cnc *CloudNodeController) getNodeModifiersFromCloudProvider(ctx context.Co
 	if instanceType, err := cnc.getInstanceTypeByName(ctx, node); err != nil {
 		return nil, err
 	} else if instanceType != "" {
-		nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelInstanceTypeStable, instanceType))
-		if cnc.enableBetaTopologyLabels {
-			nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelInstanceType, instanceType))
-		}
+		klog.V(2).Infof("Adding node label from cloud provider: %s=%s", v1.LabelInstanceTypeStable, instanceType)
+		nodeModifiers = append(nodeModifiers, func(n *v1.Node) {
+			if n.Labels == nil {
+				n.Labels = map[string]string{}
+			}
+			n.Labels[v1.LabelInstanceTypeStable] = instanceType
+		})
 	}
-
 	zone, err := cnc.getZoneByName(ctx, node)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get zone from cloud provider: %w", err)
 	}
 	if zone.FailureDomain != "" {
-		nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelZoneFailureDomainStable, zone.FailureDomain))
-		if cnc.enableBetaTopologyLabels {
-			nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelZoneFailureDomain, zone.FailureDomain))
-		}
+		klog.V(2).Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneFailureDomainStable, zone.FailureDomain)
+		nodeModifiers = append(nodeModifiers, func(n *v1.Node) {
+			if n.Labels == nil {
+				n.Labels = map[string]string{}
+			}
+			n.Labels[v1.LabelZoneFailureDomainStable] = zone.FailureDomain
+		})
 	}
 	if zone.Region != "" {
-		nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelZoneRegionStable, zone.Region))
-		if cnc.enableBetaTopologyLabels {
-			nodeModifiers = append(nodeModifiers, addCloudNodeLabel(v1.LabelZoneRegion, zone.Region))
-		}
+		klog.V(2).Infof("Adding node label from cloud provider: %s=%s", v1.LabelZoneRegionStable, zone.Region)
+		nodeModifiers = append(nodeModifiers, func(n *v1.Node) {
+			if n.Labels == nil {
+				n.Labels = map[string]string{}
+			}
+			n.Labels[v1.LabelZoneRegionStable] = zone.Region
+		})
 	}
-
 	platformSubFaultDomain, err := cnc.getPlatformSubFaultDomain()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get platformSubFaultDomain: %w", err)
 	}
 	if platformSubFaultDomain != "" {
-		nodeModifiers = append(nodeModifiers, addCloudNodeLabel(consts.LabelPlatformSubFaultDomain, platformSubFaultDomain))
+		klog.V(2).Infof("Adding node label from cloud provider: %s=%s", consts.LabelPlatformSubFaultDomain, platformSubFaultDomain)
+		nodeModifiers = append(nodeModifiers, func(n *v1.Node) {
+			if n.Labels == nil {
+				n.Labels = map[string]string{}
+			}
+			n.Labels[consts.LabelPlatformSubFaultDomain] = platformSubFaultDomain
+		})
 	}
 
 	return nodeModifiers, nil
-}
-
-// addCloudNodeLabel creates a nodeModifier that adds a label to a node.
-func addCloudNodeLabel(key, value string) func(*v1.Node) {
-	klog.V(2).Infof("Adding node label from cloud provider: %s=%s", key, value)
-	return func(node *v1.Node) {
-		if node.Labels == nil {
-			node.Labels = map[string]string{}
-		}
-		node.Labels[key] = value
-	}
 }
 
 func GetCloudTaint(taints []v1.Taint) *v1.Taint {

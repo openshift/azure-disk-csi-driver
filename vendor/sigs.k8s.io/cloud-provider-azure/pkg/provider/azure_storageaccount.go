@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2022-07-01/network"
 	"github.com/Azure/azure-sdk-for-go/services/privatedns/mgmt/2018-09-01/privatedns"
@@ -75,7 +74,6 @@ type AccountOptions struct {
 	SubnetName                              string
 	AccessTier                              string
 	MatchTags                               bool
-	GetLatestAccountKey                     bool
 	EnableBlobVersioning                    *bool
 	SoftDeleteBlobs                         int32
 	SoftDeleteContainers                    int32
@@ -127,8 +125,7 @@ func (az *Cloud) getStorageAccounts(ctx context.Context, accountOptions *Account
 }
 
 // GetStorageAccesskey gets the storage account access key
-// getLatestAccountKey: get the latest account key per CreationTime if true, otherwise get the first account key
-func (az *Cloud) GetStorageAccesskey(ctx context.Context, subsID, account, resourceGroup string, getLatestAccountKey bool) (string, error) {
+func (az *Cloud) GetStorageAccesskey(ctx context.Context, subsID, account, resourceGroup string) (string, error) {
 	if az.StorageAccountClient == nil {
 		return "", fmt.Errorf("StorageAccountClient is nil")
 	}
@@ -141,40 +138,16 @@ func (az *Cloud) GetStorageAccesskey(ctx context.Context, subsID, account, resou
 		return "", fmt.Errorf("empty keys")
 	}
 
-	var key string
-	var creationTime time.Time
-
 	for _, k := range *result.Keys {
 		if k.Value != nil && *k.Value != "" {
 			v := *k.Value
 			if ind := strings.LastIndex(v, " "); ind >= 0 {
 				v = v[(ind + 1):]
 			}
-			if !getLatestAccountKey {
-				// get first key
-				return v, nil
-			}
-			// get account key with latest CreationTime
-			if key == "" {
-				key = v
-				if k.CreationTime != nil {
-					creationTime = k.CreationTime.ToTime()
-				}
-				klog.V(2).Infof("got storage account key with creation time: %v", creationTime)
-			} else {
-				if k.CreationTime != nil && creationTime.Before(k.CreationTime.ToTime()) {
-					key = v
-					creationTime = k.CreationTime.ToTime()
-					klog.V(2).Infof("got storage account key with latest creation time: %v", creationTime)
-				}
-			}
+			return v, nil
 		}
 	}
-
-	if key == "" {
-		return "", fmt.Errorf("no valid keys")
-	}
-	return key, nil
+	return "", fmt.Errorf("no valid keys")
 }
 
 // EnsureStorageAccount search storage account, create one storage account(with genAccountNamePrefix) if not found, return accountName, accountKey
@@ -266,7 +239,7 @@ func (az *Cloud) EnsureStorageAccount(ctx context.Context, accountOptions *Accou
 		createNewAccount = false
 		if accountOptions.CreateAccount {
 			// check whether account exists
-			if _, err := az.GetStorageAccesskey(ctx, subsID, accountName, resourceGroup, accountOptions.GetLatestAccountKey); err != nil {
+			if _, err := az.GetStorageAccesskey(ctx, subsID, accountName, resourceGroup); err != nil {
 				klog.V(2).Infof("get storage key for storage account %s returned with %v", accountName, err)
 				createNewAccount = true
 			}
@@ -496,7 +469,7 @@ func (az *Cloud) EnsureStorageAccount(ctx context.Context, accountOptions *Accou
 	}
 
 	// find the access key with this account
-	accountKey, err := az.GetStorageAccesskey(ctx, subsID, accountName, resourceGroup, accountOptions.GetLatestAccountKey)
+	accountKey, err := az.GetStorageAccesskey(ctx, subsID, accountName, resourceGroup)
 	if err != nil {
 		return "", "", fmt.Errorf("could not get storage key for storage account %s: %w", accountName, err)
 	}

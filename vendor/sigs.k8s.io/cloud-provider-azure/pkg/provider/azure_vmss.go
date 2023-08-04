@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2022-07-01/network"
@@ -86,19 +85,19 @@ type ScaleSet struct {
 	// vmssCache is timed cache where the Store in the cache is a map of
 	// Key: consts.VMSSKey
 	// Value: sync.Map of [vmssName]*VMSSEntry
-	vmssCache azcache.Resource
+	vmssCache *azcache.TimedCache
 
 	// vmssVMCache is timed cache where the Store in the cache is a map of
 	// Key: [resourcegroup/vmssName]
 	// Value: sync.Map of [vmName]*VMSSVirtualMachineEntry
-	vmssVMCache azcache.Resource
+	vmssVMCache *azcache.TimedCache
 
 	// nonVmssUniformNodesCache is used to store node names from non uniform vm.
 	// Currently, the nodes can from avset or vmss flex or individual vm.
 	// This cache contains an entry called nonVmssUniformNodesEntry.
 	// nonVmssUniformNodesEntry contains avSetVMNodeNames list, clusterNodeNames list
 	// and current clusterNodeNames.
-	nonVmssUniformNodesCache azcache.Resource
+	nonVmssUniformNodesCache *azcache.TimedCache
 
 	// lockMap in cache refresh
 	lockMap *lockMap
@@ -902,7 +901,8 @@ func (ss *ScaleSet) getAgentPoolScaleSets(nodes []*v1.Node) (*[]string, error) {
 // for loadbalancer exists then return the eligible VMSet.
 func (ss *ScaleSet) GetVMSetNames(service *v1.Service, nodes []*v1.Node) (*[]string, error) {
 	hasMode, isAuto, serviceVMSetName := ss.getServiceLoadBalancerMode(service)
-	if !hasMode || ss.useStandardLoadBalancer() {
+	useSingleSLB := ss.useStandardLoadBalancer() && !ss.EnableMultipleStandardLoadBalancers
+	if !hasMode || useSingleSLB {
 		// no mode specified in service annotation or use single SLB mode
 		// default to PrimaryScaleSetName
 		scaleSetNames := &[]string{ss.Config.PrimaryScaleSetName}
@@ -1093,6 +1093,17 @@ func (ss *ScaleSet) EnsureHostInPool(service *v1.Service, nodeName types.NodeNam
 	if !ss.useStandardLoadBalancer() {
 		// need to check the vmSet name when using the basic LB
 		needCheck = true
+	} else if ss.EnableMultipleStandardLoadBalancers {
+		// need to check the vmSet name when using multiple standard LBs
+		needCheck = true
+
+		// ensure the vm that is supposed to share the primary SLB in the backendpool of the primary SLB
+		if strings.EqualFold(ss.GetPrimaryVMSetName(), vmSetNameOfLB) &&
+			ss.getVMSetNamesSharingPrimarySLB().Has(strings.ToLower(vm.VMSSName)) {
+			klog.V(4).Infof("EnsureHostInPool: the vm %s in the vmSet %s is supposed to share the primary SLB",
+				nodeName, vm.VMSSName)
+			needCheck = false
+		}
 	}
 
 	if vmSetNameOfLB != "" && needCheck && !strings.EqualFold(vmSetNameOfLB, vm.VMSSName) {
@@ -1205,7 +1216,7 @@ func (ss *ScaleSet) ensureVMSSInPool(service *v1.Service, nodes []*v1.Node, back
 
 	// the single standard load balancer supports multiple vmss in its backend while
 	// multiple standard load balancers and the basic load balancer doesn't
-	if ss.useStandardLoadBalancer() {
+	if ss.useStandardLoadBalancer() && !ss.EnableMultipleStandardLoadBalancers {
 		for _, node := range nodes {
 			if ss.excludeMasterNodesFromStandardLB() && isControlPlaneNode(node) {
 				continue
@@ -1544,7 +1555,7 @@ func (ss *ScaleSet) ensureBackendPoolDeletedFromNode(nodeName string, backendPoo
 
 	// Find primary network interface configuration.
 	if vm.VirtualMachineScaleSetVMProperties.NetworkProfileConfiguration.NetworkInterfaceConfigurations == nil {
-		klog.V(4).Infof("ensureBackendPoolDeletedFromNode: cannot obtain the primary network interface configuration, of vm %s, "+
+		klog.V(4).Infof("EnsureHostInPool: cannot obtain the primary network interface configuration, of vm %s, "+
 			"probably because the vm's being deleted", nodeName)
 		return "", "", "", nil, nil
 	}
@@ -1700,7 +1711,7 @@ func (ss *ScaleSet) ensureBackendPoolDeletedFromVmssUniform(backendPoolIDs []str
 
 	vmssNamesMap := make(map[string]bool)
 	// the standard load balancer supports multiple vmss in its backend while the basic sku doesn't
-	if ss.useStandardLoadBalancer() {
+	if ss.useStandardLoadBalancer() && !ss.EnableMultipleStandardLoadBalancers {
 		cachedUniform, err := ss.vmssCache.Get(consts.VMSSKey, azcache.CacheReadTypeDefault)
 		if err != nil {
 			klog.Errorf("ensureBackendPoolDeletedFromVMSS: failed to get vmss uniform from cache: %v", err)
@@ -1878,7 +1889,7 @@ func (ss *ScaleSet) ensureBackendPoolDeleted(service *v1.Service, backendPoolIDs
 	}
 
 	// Update VMs with best effort that have already been added to nodeUpdates.
-	var updatedVM atomic.Bool
+	var updatedVM bool
 	for meta, update := range nodeUpdates {
 		// create new instance of meta and update for passing to anonymous function
 		meta := meta
@@ -1907,22 +1918,22 @@ func (ss *ScaleSet) ensureBackendPoolDeleted(service *v1.Service, backendPoolIDs
 				return rerr.Error()
 			}
 
-			updatedVM.Store(true)
+			updatedVM = true
 			return nil
 		})
 	}
 	errs := utilerrors.AggregateGoroutines(hostUpdates...)
 	if errs != nil {
-		return updatedVM.Load(), utilerrors.Flatten(errs)
+		return updatedVM, utilerrors.Flatten(errs)
 	}
 
 	// Fail if there are other errors.
 	if len(allErrs) > 0 {
-		return updatedVM.Load(), utilerrors.Flatten(utilerrors.NewAggregate(allErrs))
+		return updatedVM, utilerrors.Flatten(utilerrors.NewAggregate(allErrs))
 	}
 
 	isOperationSucceeded = true
-	return updatedVM.Load(), nil
+	return updatedVM, nil
 }
 
 // EnsureBackendPoolDeleted ensures the loadBalancer backendAddressPools deleted from the specified nodes.
