@@ -18,10 +18,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-12-01/compute"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
 
@@ -59,13 +60,17 @@ func (ss *ScaleSet) AttachDisk(ctx context.Context, nodeName types.NodeName, dis
 		opt := v
 		attached := false
 		for _, disk := range *storageProfile.DataDisks {
-			if disk.ManagedDisk != nil && strings.EqualFold(*disk.ManagedDisk.ID, diskURI) {
-				attached = true
-				break
+			if disk.ManagedDisk != nil && strings.EqualFold(*disk.ManagedDisk.ID, diskURI) && disk.Lun != nil {
+				if *disk.Lun == opt.lun {
+					attached = true
+					break
+				} else {
+					return nil, fmt.Errorf("disk(%s) already attached to node(%s) on LUN(%d), but target LUN is %d", diskURI, nodeName, *disk.Lun, opt.lun)
+				}
 			}
 		}
 		if attached {
-			klog.V(2).Infof("azureDisk - disk(%s) already attached to node(%s)", diskURI, nodeName)
+			klog.V(2).Infof("azureDisk - disk(%s) already attached to node(%s) on LUN(%d)", diskURI, nodeName, opt.lun)
 			continue
 		}
 
@@ -103,7 +108,7 @@ func (ss *ScaleSet) AttachDisk(ctx context.Context, nodeName types.NodeName, dis
 
 	// Invalidate the cache right after updating
 	defer func() {
-		_ = ss.deleteCacheForNode(vmName)
+		_ = ss.DeleteCacheForNode(vmName)
 	}()
 
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - attach disk list(%s)", nodeResourceGroup, nodeName, diskMap)
@@ -191,7 +196,7 @@ func (ss *ScaleSet) DetachDisk(ctx context.Context, nodeName types.NodeName, dis
 	}
 	// Invalidate the cache right after updating
 	defer func() {
-		_ = ss.deleteCacheForNode(vmName)
+		_ = ss.DeleteCacheForNode(vmName)
 	}()
 
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - detach disk list(%s)", nodeResourceGroup, nodeName, diskMap)
@@ -229,7 +234,7 @@ func (ss *ScaleSet) UpdateVM(ctx context.Context, nodeName types.NodeName) error
 
 	// Invalidate the cache right after updating
 	defer func() {
-		_ = ss.deleteCacheForNode(vmName)
+		_ = ss.DeleteCacheForNode(vmName)
 	}()
 
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s)", nodeResourceGroup, nodeName)

@@ -28,7 +28,7 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-07-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-12-01/compute"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 )
@@ -433,7 +433,7 @@ func (az *Cloud) InstanceTypeByProviderID(ctx context.Context, providerID string
 // InstanceType returns the type of the specified instance.
 // Note that if the instance does not exist or is no longer running, we must return ("", cloudprovider.InstanceNotFound)
 // (Implementer Note): This is used by kubelet. Kubelet will label the node. Real log from kubelet:
-//       Adding node label from cloud provider: beta.kubernetes.io/instance-type=[value]
+// Adding node label from cloud provider: beta.kubernetes.io/instance-type=[value]
 func (az *Cloud) InstanceType(ctx context.Context, name types.NodeName) (string, error) {
 	// Returns "" for unmanaged nodes because azure cloud provider couldn't fetch information for them.
 	unmanaged, err := az.IsNodeUnmanaged(string(name))
