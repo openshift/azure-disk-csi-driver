@@ -114,7 +114,6 @@ type ManagedDiskParameters struct {
 	EnableAsyncAttach       *bool
 	EnableBursting          *bool
 	FsType                  string
-	Incremental             bool
 	Location                string
 	LogicalSectorSize       int
 	MaxShares               int
@@ -144,6 +143,20 @@ func GetCachingMode(attributes map[string]string) (compute.CachingTypes, error) 
 
 	cachingMode, err = NormalizeCachingMode(cachingMode)
 	return compute.CachingTypes(cachingMode), err
+}
+
+// GetAttachDiskInitialDelay gttachDiskInitialDelay from attributes
+// return -1 if not found
+func GetAttachDiskInitialDelay(attributes map[string]string) int {
+	for k, v := range attributes {
+		switch strings.ToLower(k) {
+		case consts.AttachDiskInitialDelayField:
+			if v, err := strconv.Atoi(v); err == nil {
+				return v
+			}
+		}
+	}
+	return -1
 }
 
 // GetCloudProviderFromClient get Azure Cloud Provider
@@ -203,6 +216,11 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 			return nil, fmt.Errorf("no cloud config provided, error: %v", err)
 		}
 	} else {
+		// Location may be either upper case with spaces (e.g. "East US") or lower case without spaces (e.g. "eastus")
+		// Kubernetes does not allow whitespaces in label values, e.g. for topology keys
+		// ensure Kubernetes compatible format for Location by enforcing lowercase-no-space format
+		config.Location = strings.ToLower(strings.ReplaceAll(config.Location, " ", ""))
+
 		// disable disk related rate limit
 		config.DiskRateLimit = &azclients.RateLimitConfig{
 			CloudProviderRateLimit: false,
@@ -426,31 +444,35 @@ func IsValidDiskURI(diskURI string) error {
 	return nil
 }
 
-func IsValidVolumeCapabilities(volCaps []*csi.VolumeCapability, maxShares int) bool {
+// IsValidVolumeCapabilities checks whether the volume capabilities are valid
+func IsValidVolumeCapabilities(volCaps []*csi.VolumeCapability, maxShares int) error {
 	if ok := IsValidAccessModes(volCaps); !ok {
-		return false
+		return fmt.Errorf("invalid access mode: %v", volCaps)
 	}
 	for _, c := range volCaps {
 		blockVolume := c.GetBlock()
 		mountVolume := c.GetMount()
 		accessMode := c.GetAccessMode().GetMode()
 
-		if (blockVolume == nil && mountVolume == nil) ||
-			(blockVolume != nil && mountVolume != nil) {
-			return false
+		if blockVolume == nil && mountVolume == nil {
+			return fmt.Errorf("blockVolume and mountVolume are both nil")
+		}
+
+		if blockVolume != nil && mountVolume != nil {
+			return fmt.Errorf("blockVolume and mountVolume are both not nil")
 		}
 		if mountVolume != nil && (accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER ||
 			accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY ||
 			accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER) {
-			return false
+			return fmt.Errorf("mountVolume is not supported for access mode: %s", accessMode.String())
 		}
 		if maxShares < 2 && (accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER ||
 			accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY ||
 			accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER) {
-			return false
+			return fmt.Errorf("access mode: %s is not supported for non-shared disk", accessMode.String())
 		}
 	}
-	return true
+	return nil
 }
 
 func IsValidAccessModes(volCaps []*csi.VolumeCapability) bool {
@@ -533,6 +555,19 @@ func ValidateDiskEncryptionType(encryptionType string) error {
 	return fmt.Errorf("DiskEncryptionType(%s) is not supported", encryptionType)
 }
 
+func ValidateDataAccessAuthMode(dataAccessAuthMode string) error {
+	if dataAccessAuthMode == "" {
+		return nil
+	}
+	supportedModes := compute.PossibleDataAccessAuthModeValues()
+	for _, s := range supportedModes {
+		if dataAccessAuthMode == string(s) {
+			return nil
+		}
+	}
+	return fmt.Errorf("dataAccessAuthMode(%s) is not supported", dataAccessAuthMode)
+}
+
 func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, error) {
 	var err error
 	if parameters == nil {
@@ -541,7 +576,6 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 
 	diskParams := ManagedDiskParameters{
 		DeviceSettings: make(map[string]string),
-		Incremental:    true, //true by default
 		Tags:           make(map[string]string),
 		VolumeContext:  parameters,
 	}
@@ -620,9 +654,9 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 			diskParams.UserAgent = v
 		case consts.EnableAsyncAttachField:
 			diskParams.VolumeContext[consts.EnableAsyncAttachField] = v
-		case consts.IncrementalField:
-			if v == "false" {
-				diskParams.Incremental = false
+		case consts.AttachDiskInitialDelayField:
+			if _, err = strconv.Atoi(v); err != nil {
+				return diskParams, fmt.Errorf("parse %s failed with error: %v", v, err)
 			}
 		case consts.ZonedField:
 			// no op, only for backward compatibility with in-tree driver
@@ -636,6 +670,13 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 			}
 		}
 	}
+
+	if strings.EqualFold(diskParams.AccountType, string(azureconstants.PremiumV2LRS)) {
+		if diskParams.CachingMode != "" && !strings.EqualFold(string(diskParams.CachingMode), string(v1.AzureDataDiskCachingNone)) {
+			return diskParams, fmt.Errorf("cachingMode %s is not supported for %s", diskParams.CachingMode, azureconstants.PremiumV2LRS)
+		}
+	}
+
 	return diskParams, nil
 }
 
@@ -718,8 +759,23 @@ func InsertDiskProperties(disk *compute.Disk, publishConext map[string]string) {
 }
 
 func SleepIfThrottled(err error, sleepSec int) {
-	if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(consts.TooManyRequests)) || strings.Contains(strings.ToLower(err.Error()), consts.ClientThrottled) {
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(consts.TooManyRequests)) || strings.Contains(strings.ToLower(err.Error()), consts.ClientThrottled) {
 		klog.Warningf("sleep %d more seconds, waiting for throttling complete", sleepSec)
 		time.Sleep(time.Duration(sleepSec) * time.Second)
 	}
+}
+
+// SetKeyValueInMap set key/value pair in map
+// key in the map is case insensitive, if key already exists, overwrite existing value
+func SetKeyValueInMap(m map[string]string, key, value string) {
+	if m == nil {
+		return
+	}
+	for k := range m {
+		if strings.EqualFold(k, key) {
+			m[k] = value
+			return
+		}
+	}
+	m[key] = value
 }

@@ -88,6 +88,7 @@ type FakeDriver interface {
 	checkDiskCapacity(context.Context, string, string, string, int) (bool, error)
 	checkDiskExists(ctx context.Context, diskURI string) (*compute.Disk, error)
 	getSnapshotInfo(string) (string, string, string, error)
+	waitForSnapshotCopy(context.Context, string, string, string, time.Duration, time.Duration) error
 	getSnapshotByID(context.Context, string, string, string, string) (*csi.Snapshot, error)
 	ensureMountPoint(string) (bool, error)
 	ensureBlockTargetFile(string) error
@@ -111,6 +112,7 @@ func newFakeDriverV1(t *testing.T) (*fakeDriverV1, error) {
 	driver.ioHandler = azureutils.NewFakeIOHandler()
 	driver.hostUtil = azureutils.NewFakeHostUtil()
 	driver.useCSIProxyGAInterface = true
+	driver.allowEmptyCloudConfig = true
 
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

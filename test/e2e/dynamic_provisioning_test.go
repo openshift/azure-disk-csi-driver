@@ -171,10 +171,11 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 		}
 
 		scParameters := map[string]string{
-			"skuName":             "Standard_LRS",
-			"networkAccessPolicy": "DenyAll",
-			"userAgent":           "azuredisk-e2e-test",
-			"enableAsyncAttach":   "false",
+			"skuName":                "Standard_LRS",
+			"networkAccessPolicy":    "DenyAll",
+			"userAgent":              "azuredisk-e2e-test",
+			"enableAsyncAttach":      "false",
+			"attachDiskInitialDelay": "5000",
 		}
 		test := testsuites.DynamicallyProvisionedVolumeSubpathTester{
 			CSIDriver:              testDriver,
@@ -734,12 +735,12 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 			ShouldOverwrite:        false,
 			PodWithSnapshot:        podWithSnapshot,
 			StorageClassParameters: map[string]string{"skuName": "StandardSSD_LRS"},
+			SnapshotStorageClassParameters: map[string]string{
+				"incremental": "false", "dataAccessAuthMode": "AzureActiveDirectory",
+			},
 		}
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
-		}
-		if !isUsingInTreeVolumePlugin && supportsZRS {
-			test.StorageClassParameters = map[string]string{"skuName": "StandardSSD_ZRS"}
 		}
 		test.Run(cs, snapshotrcs, ns)
 	})
@@ -783,12 +784,98 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 			PodOverwrite:           podOverwrite,
 			PodWithSnapshot:        podWithSnapshot,
 			StorageClassParameters: map[string]string{"skuName": "StandardSSD_LRS"},
+			SnapshotStorageClassParameters: map[string]string{
+				"incremental": "true", "dataAccessAuthMode": "None",
+			},
 		}
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
-		if !isUsingInTreeVolumePlugin && supportsZRS {
-			test.StorageClassParameters = map[string]string{"skuName": "StandardSSD_ZRS"}
+		test.Run(cs, snapshotrcs, ns)
+	})
+
+	ginkgo.It("should create a pod with small storage size, take a volume snapshot cross region, and restore disk in another region [disk.csi.azure.com]", func() {
+		skipIfUsingInTreeVolumePlugin()
+		skipIfTestingInWindowsCluster()
+
+		pod := testsuites.PodDetails{
+			IsWindows:    isWindowsCluster,
+			WinServerVer: winServerVer,
+			Cmd:          convertToPowershellorCmdCommandIfNecessary("echo 'hello world' > /mnt/test-1/data"),
+			Volumes: t.normalizeVolumes([]testsuites.VolumeDetails{
+				{
+					FSType:    getFSType(isWindowsCluster),
+					ClaimSize: "10Gi",
+					VolumeMount: testsuites.VolumeMountDetails{
+						NameGenerate:      "test-volume-",
+						MountPathGenerate: "/mnt/test-",
+					},
+					VolumeAccessMode: v1.ReadWriteOnce,
+				},
+			}, isMultiZone),
+		}
+		podWithSnapshot := testsuites.PodDetails{
+			IsWindows:    isWindowsCluster,
+			WinServerVer: winServerVer,
+			Cmd:          convertToPowershellorCmdCommandIfNecessary("grep 'hello world' /mnt/test-1/data"),
+		}
+		test := testsuites.DynamicallyProvisionedVolumeSnapshotCrossRegionTest{
+			CSIDriver:              testDriver,
+			Pod:                    pod,
+			PodWithSnapshot:        podWithSnapshot,
+			StorageClassParameters: map[string]string{"skuName": "StandardSSD_LRS"},
+			SnapshotStorageClassParameters: map[string]string{
+				"incremental": "true", "dataAccessAuthMode": "AzureActiveDirectory", "location": "westus2",
+			},
+		}
+		if location == "westus2" {
+			test.SnapshotStorageClassParameters["location"] = "westeurope"
+		}
+		if isAzureStackCloud {
+			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
+		}
+		test.Run(cs, snapshotrcs, ns)
+	})
+
+	ginkgo.It("should create a pod with large storage size, take a volume snapshot cross region, and restore disk in another region [disk.csi.azure.com]", func() {
+		skipIfUsingInTreeVolumePlugin()
+		skipIfTestingInWindowsCluster()
+
+		pod := testsuites.PodDetails{
+			IsWindows:    isWindowsCluster,
+			WinServerVer: winServerVer,
+			Cmd:          convertToPowershellorCmdCommandIfNecessary("echo 'hello world' > /mnt/test-1/data"),
+			Volumes: t.normalizeVolumes([]testsuites.VolumeDetails{
+				{
+					FSType:    getFSType(isWindowsCluster),
+					ClaimSize: "100Gi",
+					VolumeMount: testsuites.VolumeMountDetails{
+						NameGenerate:      "test-volume-",
+						MountPathGenerate: "/mnt/test-",
+					},
+					VolumeAccessMode: v1.ReadWriteOnce,
+				},
+			}, isMultiZone),
+		}
+		podWithSnapshot := testsuites.PodDetails{
+			IsWindows:    isWindowsCluster,
+			WinServerVer: winServerVer,
+			Cmd:          convertToPowershellorCmdCommandIfNecessary("grep 'hello world' /mnt/test-1/data"),
+		}
+		test := testsuites.DynamicallyProvisionedVolumeSnapshotCrossRegionTest{
+			CSIDriver:              testDriver,
+			Pod:                    pod,
+			PodWithSnapshot:        podWithSnapshot,
+			StorageClassParameters: map[string]string{"skuName": "StandardSSD_LRS"},
+			SnapshotStorageClassParameters: map[string]string{
+				"incremental": "true", "dataAccessAuthMode": "AzureActiveDirectory", "location": "westus2",
+			},
+		}
+		if location == "westus2" {
+			test.SnapshotStorageClassParameters["location"] = "westeurope"
+		}
+		if isAzureStackCloud {
+			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
 		test.Run(cs, snapshotrcs, ns)
 	})

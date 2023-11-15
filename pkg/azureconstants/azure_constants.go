@@ -61,6 +61,7 @@ const (
 	ResizeRequired                = "resizeRequired"
 	SubscriptionIDField           = "subscriptionid"
 	ResourceGroupField            = "resourcegroup"
+	DataAccessAuthModeField       = "dataaccessauthmode"
 	ResourceNotFound              = "ResourceNotFound"
 	SkuNameField                  = "skuname"
 	SourceDiskSearchMaxDepth      = 10
@@ -79,6 +80,7 @@ const (
 	WriteAcceleratorEnabled       = "writeacceleratorenabled"
 	ZonedField                    = "zoned"
 	EnableAsyncAttachField        = "enableasyncattach"
+	AttachDiskInitialDelayField   = "attachdiskinitialdelay"
 	TooManyRequests               = "TooManyRequests"
 	ClientThrottled               = "client throttled"
 	VolumeID                      = "volumeid"

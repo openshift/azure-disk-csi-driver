@@ -80,8 +80,8 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Error(codes.InvalidArgument, "MaxShares value not supported")
 	}
 
-	if !azureutils.IsValidVolumeCapabilities([]*csi.VolumeCapability{volumeCapability}, maxShares) {
-		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
+	if err := azureutils.IsValidVolumeCapabilities([]*csi.VolumeCapability{volumeCapability}, maxShares); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	if acquired := d.volumeLocks.TryAcquire(diskURI); !acquired {
@@ -226,8 +226,8 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.InvalidArgument, "MaxShares value not supported")
 	}
 
-	if !azureutils.IsValidVolumeCapabilities([]*csi.VolumeCapability{volumeCapability}, maxShares) {
-		return nil, status.Error(codes.InvalidArgument, "Volume capability not supported")
+	if err := azureutils.IsValidVolumeCapabilities([]*csi.VolumeCapability{volumeCapability}, maxShares); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	source := req.GetStagingTargetPath()
@@ -481,8 +481,10 @@ func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolume
 		}
 	}
 
+	var retErr error
 	if err := resizeVolume(devicePath, volumePath, d.mounter); err != nil {
-		return nil, status.Errorf(codes.Internal, "could not resize volume %q (%q):  %v", volumeID, devicePath, err)
+		retErr = status.Errorf(codes.Internal, "could not resize volume %q (%q):  %v", volumeID, devicePath, err)
+		klog.Errorf("%v, will continue checking whether the volume has been resized", retErr)
 	}
 
 	gotBlockSizeBytes, err := getBlockSizeBytes(devicePath, d.mounter)
@@ -491,9 +493,13 @@ func (d *Driver) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolume
 	}
 	gotBlockGiB := volumehelper.RoundUpGiB(gotBlockSizeBytes)
 	if gotBlockGiB < requestGiB {
+		if retErr != nil {
+			return nil, retErr
+		}
 		// Because size was rounded up, getting more size than requested will be a success.
 		return nil, status.Errorf(codes.Internal, "resize requested for %v, but after resizing volume size was %v", requestGiB, gotBlockGiB)
 	}
+
 	klog.V(2).Infof("NodeExpandVolume succeeded on resizing volume %v to %v", volumeID, gotBlockSizeBytes)
 
 	return &csi.NodeExpandVolumeResponse{

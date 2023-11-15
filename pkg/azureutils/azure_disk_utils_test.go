@@ -23,6 +23,7 @@ import (
 	"io/ioutil"
 	"os"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -267,6 +268,7 @@ users:
 }
 
 func TestGetCloudProvider(t *testing.T) {
+	locationRxp := regexp.MustCompile("(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?")
 	fakeCredFile, err := testutil.GetWorkDirPath("fake-cred-file.json")
 	if err != nil {
 		t.Errorf("GetWorkDirPath failed with %v", err)
@@ -318,6 +320,7 @@ users:
 		desc                  string
 		createFakeCredFile    bool
 		createFakeKubeConfig  bool
+		credFile              string
 		kubeconfig            string
 		userAgent             string
 		allowEmptyCloudConfig bool
@@ -353,6 +356,15 @@ users:
 			allowEmptyCloudConfig: true,
 			expectedErr:           nil,
 		},
+		{
+			desc:                  "[success] out of cluster & in cluster, no kubeconfig, a fake credential file with upper case Location format",
+			createFakeCredFile:    true,
+			kubeconfig:            "",
+			credFile:              "location: \"East US\"\n",
+			userAgent:             "useragent",
+			allowEmptyCloudConfig: false,
+			expectedErr:           nil,
+		},
 	}
 
 	for _, test := range tests {
@@ -363,6 +375,10 @@ users:
 			defer func() {
 				os.Remove(fakeCredFile)
 			}()
+
+			if err := os.WriteFile(fakeCredFile, []byte(test.credFile), 0666); err != nil {
+				t.Error(err)
+			}
 
 			t.Setenv(consts.DefaultAzureCredentialFileEnv, fakeCredFile)
 		}
@@ -383,6 +399,7 @@ users:
 			t.Errorf("desc: %s,\n input: %q, GetCloudProvider err: %v, expectedErr: %v", test.desc, test.kubeconfig, err, test.expectedErr)
 		}
 		if cloud != nil {
+			assert.Regexp(t, locationRxp, cloud.Location)
 			assert.Equal(t, cloud.UserAgent, test.userAgent)
 			assert.Equal(t, cloud.DiskRateLimit != nil && cloud.DiskRateLimit.CloudProviderRateLimit, false)
 			assert.Equal(t, cloud.SnapshotRateLimit != nil && cloud.SnapshotRateLimit.CloudProviderRateLimit, false)
@@ -1007,7 +1024,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 		description    string
 		volCaps        []*csi.VolumeCapability
 		maxShares      int
-		expectedResult bool
+		expectedResult error
 	}{
 		{
 			description: "[Success] Returns true for valid mount capabilities",
@@ -1022,7 +1039,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: true,
+			expectedResult: nil,
 		},
 		{
 			description: "[Failure] Returns false for unsupported mount access mode",
@@ -1037,7 +1054,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      2,
-			expectedResult: false,
+			expectedResult: fmt.Errorf("mountVolume is not supported for access mode: MULTI_NODE_MULTI_WRITER"),
 		},
 		{
 			description: "[Failure] Returns false for invalid mount access mode",
@@ -1052,7 +1069,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: false,
+			expectedResult: fmt.Errorf("invalid access mode: [mount:<> access_mode:<mode:10 > ]"),
 		},
 		{
 			description: "[Success] Returns true for valid block capabilities",
@@ -1067,7 +1084,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: true,
+			expectedResult: nil,
 		},
 		{
 			description: "[Success] Returns true for shared block access mode",
@@ -1082,7 +1099,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      2,
-			expectedResult: true,
+			expectedResult: nil,
 		},
 		{
 			description: "[Failure] Returns false for unsupported mount access mode",
@@ -1097,7 +1114,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: false,
+			expectedResult: fmt.Errorf("access mode: MULTI_NODE_MULTI_WRITER is not supported for non-shared disk"),
 		},
 		{
 			description: "[Failure] Returns false for invalid block access mode",
@@ -1112,7 +1129,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: false,
+			expectedResult: fmt.Errorf("invalid access mode: [block:<> access_mode:<mode:10 > ]"),
 		},
 		{
 			description: "[Failure] Returns false for empty volume capability",
@@ -1123,7 +1140,7 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 				},
 			},
 			maxShares:      1,
-			expectedResult: false,
+			expectedResult: fmt.Errorf("invalid access mode: []"),
 		},
 	}
 
@@ -1144,8 +1161,8 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 		},
 	}
 	caps = append(caps, &stdVolCap)
-	if !IsValidVolumeCapabilities(caps, 1) {
-		t.Errorf("Unexpected error")
+	if err := IsValidVolumeCapabilities(caps, 1); err != nil {
+		t.Errorf("Unexpected error: %v", err)
 	}
 	stdVolCap1 := csi.VolumeCapability{
 		AccessMode: &csi.VolumeCapability_AccessMode{
@@ -1153,8 +1170,8 @@ func TestIsValidVolumeCapabilities(t *testing.T) {
 		},
 	}
 	caps = append(caps, &stdVolCap1)
-	if IsValidVolumeCapabilities(caps, 1) {
-		t.Errorf("Unexpected error")
+	if err := IsValidVolumeCapabilities(caps, 1); err == nil {
+		t.Errorf("Unexpected success")
 	}
 }
 
@@ -1223,7 +1240,35 @@ func TestValidateDiskEncryptionType(t *testing.T) {
 	}
 	for _, test := range tests {
 		err := ValidateDiskEncryptionType(test.diskEncryptionType)
-		assert.Equal(t, err, test.expectedErr)
+		assert.Equal(t, test.expectedErr, err)
+	}
+}
+
+func TestValidateDataAccessAuthMode(t *testing.T) {
+	tests := []struct {
+		dataAccessAuthMode string
+		expectedErr        error
+	}{
+		{
+			dataAccessAuthMode: "",
+			expectedErr:        nil,
+		},
+		{
+			dataAccessAuthMode: "None",
+			expectedErr:        nil,
+		},
+		{
+			dataAccessAuthMode: "AzureActiveDirectory",
+			expectedErr:        nil,
+		},
+		{
+			dataAccessAuthMode: "invalid",
+			expectedErr:        fmt.Errorf("dataAccessAuthMode(invalid) is not supported"),
+		},
+	}
+	for _, test := range tests {
+		err := ValidateDataAccessAuthMode(test.dataAccessAuthMode)
+		assert.Equal(t, test.expectedErr, err)
 	}
 }
 
@@ -1363,7 +1408,6 @@ func TestParseDiskParameters(t *testing.T) {
 			name:        "nil disk parameters",
 			inputParams: nil,
 			expectedOutput: ManagedDiskParameters{
-				Incremental:    true,
 				Tags:           make(map[string]string),
 				VolumeContext:  make(map[string]string),
 				DeviceSettings: make(map[string]string),
@@ -1374,7 +1418,6 @@ func TestParseDiskParameters(t *testing.T) {
 			name:        "invalid field in parameters",
 			inputParams: map[string]string{"invalidField": "someValue"},
 			expectedOutput: ManagedDiskParameters{
-				Incremental:    true,
 				Tags:           make(map[string]string),
 				VolumeContext:  map[string]string{"invalidField": "someValue"},
 				DeviceSettings: make(map[string]string),
@@ -1382,15 +1425,71 @@ func TestParseDiskParameters(t *testing.T) {
 			expectedError: fmt.Errorf("invalid parameter %s in storage class", "invalidField"),
 		},
 		{
-			name:        "invalid value in parameters",
+			name:        "invalid LogicalSectorSize value in parameters",
 			inputParams: map[string]string{consts.LogicalSectorSizeField: "invalidValue"},
 			expectedOutput: ManagedDiskParameters{
-				Incremental:    true,
 				Tags:           make(map[string]string),
 				VolumeContext:  map[string]string{consts.LogicalSectorSizeField: "invalidValue"},
 				DeviceSettings: make(map[string]string),
 			},
 			expectedError: fmt.Errorf("parse invalidValue failed with error: strconv.Atoi: parsing \"invalidValue\": invalid syntax"),
+		},
+		{
+			name:        "invalid AttachDiskInitialDelay value in parameters",
+			inputParams: map[string]string{consts.AttachDiskInitialDelayField: "invalidValue"},
+			expectedOutput: ManagedDiskParameters{
+				Tags:           make(map[string]string),
+				VolumeContext:  map[string]string{consts.AttachDiskInitialDelayField: "invalidValue"},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: fmt.Errorf("parse invalidValue failed with error: strconv.Atoi: parsing \"invalidValue\": invalid syntax"),
+		},
+		{
+			name:        "disk parameters with PremiumV2_LRS",
+			inputParams: map[string]string{consts.SkuNameField: "PremiumV2_LRS"},
+			expectedOutput: ManagedDiskParameters{
+				AccountType:    "PremiumV2_LRS",
+				Tags:           make(map[string]string),
+				VolumeContext:  map[string]string{consts.SkuNameField: "PremiumV2_LRS"},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: nil,
+		},
+		{
+			name: "disk parameters with PremiumV2_LRS (valid cachingMode)",
+			inputParams: map[string]string{
+				consts.SkuNameField:     "PremiumV2_LRS",
+				consts.CachingModeField: "none",
+			},
+			expectedOutput: ManagedDiskParameters{
+				AccountType: "PremiumV2_LRS",
+				CachingMode: "none",
+				Tags:        make(map[string]string),
+				VolumeContext: map[string]string{
+					consts.SkuNameField:     "PremiumV2_LRS",
+					consts.CachingModeField: "none",
+				},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: nil,
+		},
+		{
+			name: "disk parameters with PremiumV2_LRS (invalid cachingMode)",
+			inputParams: map[string]string{
+				consts.SkuNameField:     "PremiumV2_LRS",
+				consts.CachingModeField: "ReadOnly",
+			},
+			expectedOutput: ManagedDiskParameters{
+				AccountType: "PremiumV2_LRS",
+				CachingMode: "ReadOnly",
+				Tags:        make(map[string]string),
+				VolumeContext: map[string]string{
+					consts.SkuNameField:     "PremiumV2_LRS",
+					consts.CachingModeField: "ReadOnly",
+				},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: fmt.Errorf("cachingMode ReadOnly is not supported for PremiumV2_LRS"),
 		},
 		{
 			name: "valid parameters input",
@@ -1418,7 +1517,6 @@ func TestParseDiskParameters(t *testing.T) {
 				consts.EnableBurstingField:      "true",
 				consts.UserAgentField:           "userAgent",
 				consts.EnableAsyncAttachField:   "enableAsyncAttach",
-				consts.IncrementalField:         "false",
 				consts.ZonedField:               "ignored",
 			},
 			expectedOutput: ManagedDiskParameters{
@@ -1430,7 +1528,6 @@ func TestParseDiskParameters(t *testing.T) {
 				DiskMBPSReadWrite:   "diskMBPSReadWrite",
 				DiskName:            "diskName",
 				DiskEncryptionSetID: "diskEncyptionSetID",
-				Incremental:         false,
 				Tags: map[string]string{
 					consts.PvcNameTag:      "pvcName",
 					consts.PvcNamespaceTag: "pvcNamespace",
@@ -1469,7 +1566,6 @@ func TestParseDiskParameters(t *testing.T) {
 					consts.EnableBurstingField:      "true",
 					consts.UserAgentField:           "userAgent",
 					consts.EnableAsyncAttachField:   "enableAsyncAttach",
-					consts.IncrementalField:         "false",
 					consts.ZonedField:               "ignored",
 				},
 				DeviceSettings:    make(map[string]string),
@@ -1723,5 +1819,90 @@ func TestSleepIfThrottled(t *testing.T) {
 				assert.GreaterOrEqual(t, actualSleepDuration, test.expectedSleepDuration)
 			}
 		})
+	}
+}
+
+func TestSetKeyValueInMap(t *testing.T) {
+	tests := []struct {
+		desc     string
+		m        map[string]string
+		key      string
+		value    string
+		expected map[string]string
+	}{
+		{
+			desc:  "nil map",
+			key:   "key",
+			value: "value",
+		},
+		{
+			desc:     "empty map",
+			m:        map[string]string{},
+			key:      "key",
+			value:    "value",
+			expected: map[string]string{"key": "value"},
+		},
+		{
+			desc:  "non-empty map",
+			m:     map[string]string{"k": "v"},
+			key:   "key",
+			value: "value",
+			expected: map[string]string{
+				"k":   "v",
+				"key": "value",
+			},
+		},
+		{
+			desc:     "same key already exists",
+			m:        map[string]string{"subDir": "value2"},
+			key:      "subDir",
+			value:    "value",
+			expected: map[string]string{"subDir": "value"},
+		},
+		{
+			desc:     "case insensitive key already exists",
+			m:        map[string]string{"subDir": "value2"},
+			key:      "subdir",
+			value:    "value",
+			expected: map[string]string{"subDir": "value"},
+		},
+	}
+
+	for _, test := range tests {
+		SetKeyValueInMap(test.m, test.key, test.value)
+		if !reflect.DeepEqual(test.m, test.expected) {
+			t.Errorf("test[%s]: unexpected output: %v, expected result: %v", test.desc, test.m, test.expected)
+		}
+	}
+}
+
+func TestGetAttachDiskInitialDelay(t *testing.T) {
+	tests := []struct {
+		name       string
+		attributes map[string]string
+		expected   int
+	}{
+		{
+			attributes: nil,
+			expected:   -1,
+		},
+		{
+			attributes: map[string]string{consts.AttachDiskInitialDelayField: "10"},
+			expected:   10,
+		},
+		{
+			attributes: map[string]string{"AttachDiskInitialDelay": "90"},
+			expected:   90,
+		},
+		{
+			attributes: map[string]string{"unknown": "90"},
+			expected:   -1,
+		},
+	}
+
+	for _, test := range tests {
+		if got := GetAttachDiskInitialDelay(test.attributes); got != test.expected {
+			t.Errorf("GetAttachDiskInitialDelay(%v) = %v, want %v", test.attributes, got, test.expected)
+		}
 	}
 }

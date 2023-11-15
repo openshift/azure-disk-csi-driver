@@ -19,7 +19,7 @@ REGISTRY_NAME ?= $(shell echo $(REGISTRY) | sed "s/.azurecr.io//g")
 IMAGE_NAME ?= azuredisk-csi
 ifneq ($(BUILD_V2), true)
 PLUGIN_NAME = azurediskplugin
-IMAGE_VERSION ?= v1.26.0
+IMAGE_VERSION ?= v1.26.7
 CHART_VERSION ?= latest
 else
 PLUGIN_NAME = azurediskpluginv2
@@ -175,7 +175,9 @@ container-linux:
 		--file ./pkg/azurediskplugin/Dockerfile \
 		--platform="linux/$(ARCH)" \
 		--build-arg ARCH=${ARCH} \
-		--build-arg PLUGIN_NAME=${PLUGIN_NAME}
+		--build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+		--provenance=false \
+		--sbom=false
 
 .PHONY: container-windows
 container-windows:
@@ -187,7 +189,9 @@ container-windows:
 		--file ./pkg/azurediskplugin/Windows.Dockerfile \
 		--build-arg ARCH=${ARCH} \
 		--build-arg PLUGIN_NAME=${PLUGIN_NAME} \
-		--build-arg OSVERSION=$(OSVERSION) 
+		--build-arg OSVERSION=$(OSVERSION) \
+		--provenance=false \
+		--sbom=false
 
 .PHONY: container-all
 container-all: azuredisk-windows
