@@ -1,0 +1,54 @@
+{
+    "apiVersion": "vlabs",
+    "location": "",
+    "properties": {
+        "orchestratorProfile": {
+            "orchestratorType": "Kubernetes",
+            "orchestratorRelease": "",
+            "kubernetesConfig": {
+                "networkPolicy": "none",
+                "containerRuntime": "containerd",
+                "cloudProviderRateLimitQPS": 6,
+                "cloudProviderRateLimitBucket": 20,
+                "apiServerConfig": {
+                    "--enable-admission-plugins": "NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota,AlwaysPullImages"
+                },
+                "useCloudControllerManager": true,
+                "customCcmImage": "",
+                "addons": [
+                    {
+                        "name": "cloud-node-manager",
+                        "enabled": true,
+                        "containers": [
+                            {
+                                "name": "cloud-node-manager",
+                                "image": ""
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "masterProfile": {
+            "count": 1,
+            "dnsPrefix": "k8s-with-custom-ccm",
+            "vmSize": "Standard_D4s_v3"
+        },
+        "agentPoolProfiles": [
+            {
+                "name": "agentpool1",
+                "count": 1,
+                "vmSize": "Standard_D4s_v3",
+                "availabilityProfile": "VirtualMachineScaleSets",
+                "storageProfile": "ManagedDisks"
+            }
+        ],
+        "linuxProfile": {
+            "adminUsername": "azureuser"
+        },
+        "servicePrincipalProfile": {
+            "clientID": "",
+            "secret": ""
+        }
+    }
+}

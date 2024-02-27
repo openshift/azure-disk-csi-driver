@@ -1,0 +1,31 @@
+.glide/
+.pkg_config
+bin/
+obj/
+testResults/
+_artifacts
+_report
+_output/
+translations/
+node_modules/
+public/
+site/public/
+
+# bazel
+/bazel-bin
+/bazel-cloud-provider-azure
+/bazel-genfiles
+/bazel-out
+/bazel-testlogs
+
+# ssh keys
+.ssh*
+
+# vscode
+.vscode
+
+# goland
+.idea
+
+# helm chart verification
+chart_verify/

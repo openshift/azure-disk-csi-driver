@@ -1,0 +1,12 @@
+*
+!.git
+!cloud-controller-manager
+!Makefile
+!hack/pkg-config.sh
+!vendor
+!cmd
+!pkg
+!bin
+!go.mod
+!go.sum
+!tests
