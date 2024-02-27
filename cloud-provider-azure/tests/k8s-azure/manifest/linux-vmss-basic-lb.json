@@ -1,0 +1,60 @@
+{
+  "apiVersion": "vlabs",
+  "location": "",
+  "properties": {
+    "orchestratorProfile": {
+      "orchestratorType": "Kubernetes",
+      "orchestratorRelease": "1.19",
+      "kubernetesConfig": {
+        "useManagedIdentity": false,
+        "networkPolicy": "none",
+        "containerRuntime": "containerd",
+        "cloudProviderRateLimitQPS": 6,
+        "cloudProviderRateLimitBucket": 20,
+        "apiServerConfig": {
+          "--enable-admission-plugins": "NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota,AlwaysPullImages",
+          "--feature-gates": "MixedProtocolLBService=true"
+        },
+        "kubeletConfig": {
+          "--feature-gates": "ExecProbeTimeout=true"
+        },
+        "loadBalancerSku": "Basic"
+      }
+    },
+    "masterProfile": {
+      "count": 3,
+      "dnsPrefix": "{dnsPrefix}",
+      "vmSize": "Standard_DS2_v2"
+    },
+    "agentPoolProfiles": [
+      {
+        "name": "agentpool1",
+        "count": 2,
+        "vmSize": "Standard_DS3_v2",
+        "availabilityProfile": "VirtualMachineScaleSets",
+        "storageProfile": "ManagedDisks"
+      },
+      {
+        "name": "agentpool2",
+        "count": 2,
+        "vmSize": "Standard_DS3_v2",
+        "availabilityProfile": "VirtualMachineScaleSets",
+        "storageProfile": "ManagedDisks"
+      }
+    ],
+    "linuxProfile": {
+      "adminUsername": "k8s-ci",
+      "ssh": {
+        "publicKeys": [
+          {
+            "keyData": "{keyData}"
+          }
+        ]
+      }
+    },
+    "servicePrincipalProfile": {
+      "clientID": "{servicePrincipalClientID}",
+      "secret": "{servicePrincipalClientSecret}"
+    }
+  }
+}

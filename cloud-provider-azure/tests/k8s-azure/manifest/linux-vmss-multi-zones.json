@@ -1,0 +1,61 @@
+{
+    "apiVersion": "vlabs",
+    "location": "",
+    "properties": {
+        "orchestratorProfile": {
+            "orchestratorType": "Kubernetes",
+            "orchestratorRelease": "1.19",
+            "kubernetesConfig": {
+                "networkPolicy": "none",
+                "cloudProviderRateLimitQPS": 6,
+                "cloudProviderRateLimitBucket": 20,
+                "apiServerConfig": {
+                    "--enable-admission-plugins": "NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota,AlwaysPullImages",
+                    "--feature-gates": "TopologyAwareHints=True"
+                },
+                "kubeletConfig": {
+                    "--feature-gates": "ExecProbeTimeout=true,TopologyAwareHints=True"
+                },
+                "controllerManagerConfig": {
+                    "--feature-gates": "TopologyAwareHints=True"
+                },
+                "outboundRuleIdleTimeoutInMinutes": 30
+            }
+        },
+        "masterProfile": {
+            "count": 5,
+            "dnsPrefix": "{dnsPrefix}",
+            "vmSize": "Standard_DS2_v2",
+            "availabilityZones": [
+                "1",
+                "2"
+            ]
+        },
+        "agentPoolProfiles": [
+            {
+                "name": "agentpool",
+                "count": 4,
+                "vmSize": "Standard_DS3_v2",
+                "availabilityProfile": "VirtualMachineScaleSets",
+                "availabilityZones": [
+                    "1",
+                    "2"
+                ]
+            }
+        ],
+        "linuxProfile": {
+            "adminUsername": "k8s-ci",
+            "ssh": {
+                "publicKeys": [
+                    {
+                        "keyData": "{keyData}"
+                    }
+                ]
+            }
+        },
+        "servicePrincipalProfile": {
+            "clientID": "{servicePrincipalClientID}",
+            "secret": "{servicePrincipalClientSecret}"
+        }
+    }
+}

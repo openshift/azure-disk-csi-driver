@@ -1,0 +1,100 @@
+# cases having special requirements
+## does not support GetSigner, for ssh
+[sig-node] Mount propagation
+[sig-network] Network should set TCP CLOSE_WAIT timeout
+[sig-storage] PersistentVolumes-local Stress with local volume provisioner [Serial] should use be able to process many pods and reuse local volumes
+should unmount if pod is gracefully deleted while kubelet is down [Disruptive][Slow]
+should unmount if pod is force deleted while kubelet is down [Disruptive][Slow]
+
+## Others
+[sig-network] Services should be able to create a functioning NodePort service # could not connect locally
+[sig-scheduling] SchedulerPredicates [Serial] validates MaxPods limit number of pods that are allowed to run [Slow] # IsMasterNode function does not apply
+
+# cases using dynamic PVC, pending on dynamic provision support
+[sig-storage] Dynamic Provisioning DynamicProvisioner Default should create and delete default persistent volumes [Slow]
+[sig-storage] Dynamic Provisioning DynamicProvisioner should provision storage with different parameters
+[sig-storage] Dynamic Provisioning DynamicProvisioner should test that deleting a claim before the volume is provisioned deletes the volume.
+[sig-apps] StatefulSet [k8s.io] Basic StatefulSet functionality [StatefulSetBasic] should adopt matching orphans and release non-matching pods
+[sig-apps] StatefulSet [k8s.io] Basic StatefulSet functionality [StatefulSetBasic] should not deadlock when a pod's predecessor fails
+[sig-apps] StatefulSet [k8s.io] Basic StatefulSet functionality [StatefulSetBasic] should perform rolling updates and roll backs of template modifications with PVCs
+[sig-apps] StatefulSet [k8s.io] Basic StatefulSet functionality [StatefulSetBasic] should provide basic identity
+[sig-storage] PersistentVolumes Default StorageClass pods that use multiple volumes should be reschedulable
+[sig-storage] PVC Protection
+[sig-storage] Dynamic Provisioning [k8s.io] GlusterDynamicProvisioner
+[sig-storage] Volumes Azure Disk should be mountable [Slow]
+
+# cases using 'TestUnderTemporaryNetworkFailure', which is not supported for following listed, others are skipped by provider check
+#[sig-apps] Network Partition [Disruptive] [Slow] [k8s.io] [Job] should create new pods when node is partitioned
+#[sig-apps] Network Partition [Disruptive] [Slow] [k8s.io] [ReplicationController] should eagerly create replacement pod during network partition when termination grace is non-zero
+#[sig-apps] Network Partition [Disruptive] [Slow] [k8s.io] [ReplicationController] should recreate pods scheduled on the unreachable node AND allow scheduling of pods on a node after it rejoins the cluster
+[sig-apps] Network Partition [Disruptive] [Slow]
+
+# cases in a flaky manner
+# 'upstreamNameservers' config sometimes does not populate in time
+#[sig-network] DNS configMap federations should be able to change federation configuration [Slow][Serial]
+#[sig-network] DNS configMap nameserver Change stubDomain should be able to change stubDomain configuration [Slow][Serial]
+#[sig-network] DNS configMap nameserver Forward external name lookup should forward externalname lookup to upstream nameserver [Slow][Serial]
+#[sig-network] DNS configMap nameserver Forward PTR lookup should forward PTR records lookup to upstream nameserver [Slow][Serial]
+[sig-network] DNS configMap
+
+# cases for perf, rss memory setting varies
+[k8s.io] [sig-node] Kubelet [Serial] [Slow] [k8s.io] [sig-node] regular resource usage tracking resource tracking for 0 pods per node
+[k8s.io] [sig-node] Kubelet [Serial] [Slow] [k8s.io] [sig-node] regular resource usage tracking resource tracking for 100 pods per node
+
+# cases depending on resource metrics https://github.com/Azure/acs-engine/issues/1936
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [DisabledForLargeClusters] ReplicationController light Should scale from 1 pod to 2 pods
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [DisabledForLargeClusters] ReplicationController light Should scale from 2 pods to 1 pod
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] Deployment Should scale from 1 pod to 3 pods and from 3 to 5
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] Deployment Should scale from 5 pods to 3 pods and from 3 to 1
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] ReplicaSet Should scale from 1 pod to 3 pods and from 3 to 5
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] ReplicaSet Should scale from 5 pods to 3 pods and from 3 to 1
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] ReplicationController Should scale from 1 pod to 3 pods and from 3 to 5 and verify decision stability
+#[sig-autoscaling] [HPA] Horizontal pod autoscaling (scale resource: CPU) [sig-autoscaling] [Serial] [Slow] ReplicationController Should scale from 5 pods to 3 pods and from 3 to 1 and verify decision stability
+Horizontal pod autoscaling (scale resource: CPU)
+
+# case pending on kubelet config, https://github.com/Azure/acs-engine/issues/1882
+[sig-storage] Dynamic Provisioning DynamicProvisioner External should let an external dynamic provisioner create and delete persistent volumes [Slow]
+
+# Broken due to clean up https://github.com/kubernetes/kubernetes/pull/63489
+# [sig-network] Services should have session affinity work for LoadBalancer service with ESIPP on [Slow] [DisabledForLargeClusters]
+# [sig-network] Services should be able to switch session affinity for LoadBalancer service with ESIPP on [Slow] [DisabledForLargeClusters]
+# [sig-network] Services should have session affinity work for LoadBalancer service with ESIPP off [Slow] [DisabledForLargeClusters]
+# [sig-network] Services should be able to switch session affinity for LoadBalancer service with ESIPP off [Slow] [DisabledForLargeClusters]
+ESIPP
+
+# Broken due to kubernetes version upgrade.
+[sig-network] Services should preserve source pod IP for traffic thru service cluster IP
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] provisioning should provision storage
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support existing directories when readOnly specified in the volumeSource
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support existing directory
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support existing single file
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support file as subpath
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support non-existent path
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support readOnly directory specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] subPath should support readOnly file specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (default fs)] volumes should be mountable
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Dynamic PV (ext4)] volumes should be mountable
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support existing directories when readOnly specified in the volumeSource
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support existing directory
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support existing single file
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support file as subpath
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support non-existent path
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support readOnly directory specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] subPath should support readOnly file specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (default fs)] volumes should be mountable
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Inline-volume (ext4)] volumes should be mountable
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support existing directories when readOnly specified in the volumeSource
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support existing directory
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support existing single file
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support file as subpath
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support non-existent path
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support readOnly directory specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] subPath should support readOnly file specified in the volumeMount
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (default fs)] volumes should be mountable
+#[sig-storage] In-tree Volumes [Driver: azure] [Testpattern: Pre-provisioned PV (ext4)] volumes should be mountable
+
+# Broken due to 1.13 changes
+In-tree Volumes
+PersistentVolumes-local
+CSI Volumes
+should write entries to /etc/hosts

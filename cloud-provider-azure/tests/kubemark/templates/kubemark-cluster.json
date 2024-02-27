@@ -1,0 +1,57 @@
+{
+    "apiVersion": "vlabs",
+    "location": "",
+    "properties": {
+        "orchestratorProfile": {
+            "orchestratorType": "Kubernetes",
+            "orchestratorRelease": "1.19",
+            "kubernetesConfig": {
+                "networkPolicy": "none",
+                "cloudProviderRateLimitQPS": 6,
+                "cloudProviderRateLimitBucket": 20,
+                "controllerManagerConfig": {
+                    "--profiling": "true"
+                },
+                "apiServerConfig": {
+                    "--enable-admission-plugins": "NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota,AlwaysPullImages",
+                    "--profiling": "true"
+                },
+                "schedulerConfig": {
+                    "--profiling": "true"
+                }
+            }
+        },
+        "masterProfile": {
+            "count": 1,
+            "dnsPrefix": "{{DNS_PREFIX}}",
+            "vmSize": "Standard_DS2_v2",
+            "extensions": [
+                {
+                    "name": "config-kubemark-master"
+                }
+            ]
+        },
+        "extensionProfiles": [
+            {
+                "name": "config-kubemark-master",
+                "version": "v1",
+                "extensionParameters": "parameters",
+                "rootURL": "https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/kubemark/"
+            }
+        ],
+        "linuxProfile": {
+            "adminUsername": "kubernetes",
+            "ssh": {
+                "publicKeys": [
+                    {
+                        "keyData": "{{SSH_PUBLIC_KEY}}"
+                    }
+                ]
+            }
+        },
+        "servicePrincipalProfile": {
+            "clientID": "{{AZURE_CLIENT_ID}}",
+            "secret": "{{AZURE_CLIENT_SECRET}}"
+        }
+    }
+}

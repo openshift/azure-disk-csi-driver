@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-scheduler
+  namespace: kube-system
+  labels:
+    tier: control-plane
+    component: kube-scheduler
+spec:
+  hostNetwork: true
+  containers:
+    - name: kube-scheduler
+      image: k8s.gcr.io/kube-scheduler:v1.22.1
+      imagePullPolicy: IfNotPresent
+      command: ["kube-scheduler"]
+      args: ["--kubeconfig=/var/lib/kube-scheduler/kubeconfig", "--leader-elect=true", "--profiling=false", "--v=2"]
+      volumeMounts:
+        - name: etc-kubernetes
+          mountPath: /etc/kubernetes
+        - name: var-lib-kube-scheduler
+          mountPath: /var/lib/kube-scheduler
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 4
+          memory: 2Gi
+  volumes:
+    - name: etc-kubernetes
+      hostPath:
+        path: /etc/kubernetes
+    - name: var-lib-kube-scheduler
+      hostPath:
+        path: /var/lib/kube-scheduler
