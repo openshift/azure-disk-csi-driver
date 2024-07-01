@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	volumehelper "sigs.k8s.io/azuredisk-csi-driver/pkg/util"
+	azureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/metrics"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
@@ -174,7 +175,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	requirement := req.GetAccessibilityRequirements()
 	diskZone := azureutils.PickAvailabilityZone(requirement, diskParams.Location, topologyKey)
 	accessibleTopology := []*csi.Topology{}
-	if skuName == compute.StandardSSDZRS || skuName == compute.PremiumZRS {
+	if strings.HasSuffix(string(skuName), "ZRS") || strings.HasSuffix(string(skuName), "zrs") {
 		klog.V(2).Infof("diskZone(%s) is reset as empty since disk(%s) is ZRS(%s)", diskZone, diskParams.DiskName, skuName)
 		diskZone = ""
 		// make volume scheduled on all 3 availability zones
@@ -425,9 +426,8 @@ func (d *Driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 		// Volume is already attached to node.
 		klog.V(2).Infof("Attach operation is successful. volume %s is already attached to node %s at lun %d.", diskURI, nodeName, lun)
 	} else {
-		if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(consts.TooManyRequests)) ||
-			strings.Contains(strings.ToLower(err.Error()), consts.ClientThrottled) {
-			return nil, status.Errorf(codes.Internal, err.Error())
+		if !strings.Contains(err.Error(), azureconsts.CannotFindDiskLUN) {
+			return nil, status.Errorf(codes.Internal, "could not get disk lun for volume %s: %v", diskURI, err)
 		}
 		var cachingMode compute.CachingTypes
 		if cachingMode, err = azureutils.GetCachingMode(volumeContext); err != nil {
@@ -563,6 +563,10 @@ func (d *Driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.Valida
 func (d *Driver) getOccupiedLunsFromNode(ctx context.Context, nodeName types.NodeName, diskURI string) []int {
 	var occupiedLuns []int
 	if d.checkDiskLUNCollision && !d.isCheckDiskLunThrottled() {
+		timer := time.AfterFunc(checkDiskLunThrottleLatency, func() {
+			klog.Warningf("checkDiskLun(%s) on node %s took longer than %v, disable disk lun check temporarily", diskURI, nodeName, checkDiskLunThrottleLatency)
+			d.checkDiskLunThrottlingCache.Set(consts.CheckDiskLunThrottlingKey, "")
+		})
 		now := time.Now()
 		if usedLunsFromVA, err := d.getUsedLunsFromVolumeAttachments(ctx, string(nodeName)); err == nil {
 			if len(usedLunsFromVA) > 0 {
@@ -582,9 +586,9 @@ func (d *Driver) getOccupiedLunsFromNode(ctx context.Context, nodeName types.Nod
 		}
 		latency := time.Since(now)
 		if latency > checkDiskLunThrottleLatency {
-			klog.Warningf("checkDiskLun(%s) on node %s took %v (limit: %v), disable disk lun check temporarily", diskURI, nodeName, latency, checkDiskLunThrottleLatency)
-			d.throttlingCache.Set(consts.CheckDiskLunThrottlingKey, "")
+			klog.Warningf("checkDiskLun(%s) on node %s took %v (limit: %v)", diskURI, nodeName, latency, checkDiskLunThrottleLatency)
 		} else {
+			timer.Stop() // cancel the timer
 			klog.V(6).Infof("checkDiskLun(%s) on node %s took %v", diskURI, nodeName, latency)
 		}
 	}

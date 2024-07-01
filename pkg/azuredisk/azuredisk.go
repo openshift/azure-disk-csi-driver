@@ -54,6 +54,7 @@ type DriverOptions struct {
 	NodeID                       string
 	DriverName                   string
 	VolumeAttachLimit            int64
+	ReservedDataDiskSlotNum      int64
 	EnablePerfOptimization       bool
 	CloudConfigSecretName        string
 	CloudConfigSecretNamespace   string
@@ -73,6 +74,7 @@ type DriverOptions struct {
 	TrafficManagerPort           int64
 	AttachDetachInitialDelayInMs int64
 	VMSSCacheTTLInSeconds        int64
+	VolStatsCacheExpireInMinutes int64
 	VMType                       string
 	EnableWindowsHostProcess     bool
 	GetNodeIDFromIMDS            bool
@@ -122,6 +124,7 @@ type DriverCore struct {
 	enableTrafficManager         bool
 	trafficManagerPort           int64
 	vmssCacheTTLInSeconds        int64
+	volStatsCacheExpireInMinutes int64
 	attachDetachInitialDelayInMs int64
 	vmType                       string
 	enableWindowsHostProcess     bool
@@ -129,6 +132,8 @@ type DriverCore struct {
 	enableOtelTracing            bool
 	shouldWaitForSnapshotReady   bool
 	checkDiskLUNCollision        bool
+	// a timed cache storing volume stats <volumeID, volumeStats>
+	volStatsCache azcache.Resource
 }
 
 // Driver is the v1 implementation of the Azure Disk CSI Driver.
@@ -137,6 +142,8 @@ type Driver struct {
 	volumeLocks *volumehelper.VolumeLocks
 	// a timed cache for throttling
 	throttlingCache azcache.Resource
+	// a timed cache for disk lun collision check throttling
+	checkDiskLunThrottlingCache azcache.Resource
 }
 
 // newDriverV1 Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
@@ -147,6 +154,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.Version = driverVersion
 	driver.NodeID = options.NodeID
 	driver.VolumeAttachLimit = options.VolumeAttachLimit
+	driver.ReservedDataDiskSlotNum = options.ReservedDataDiskSlotNum
 	driver.perfOptimizationEnabled = options.EnablePerfOptimization
 	driver.cloudConfigSecretName = options.CloudConfigSecretName
 	driver.cloudConfigSecretNamespace = options.CloudConfigSecretNamespace
@@ -166,6 +174,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.enableTrafficManager = options.EnableTrafficManager
 	driver.trafficManagerPort = options.TrafficManagerPort
 	driver.vmssCacheTTLInSeconds = options.VMSSCacheTTLInSeconds
+	driver.volStatsCacheExpireInMinutes = options.VolStatsCacheExpireInMinutes
 	driver.vmType = options.VMType
 	driver.enableWindowsHostProcess = options.EnableWindowsHostProcess
 	driver.getNodeIDFromIMDS = options.GetNodeIDFromIMDS
@@ -178,13 +187,20 @@ func newDriverV1(options *DriverOptions) *Driver {
 
 	topologyKey = fmt.Sprintf("topology.%s/zone", driver.Name)
 
-	cache, err := azcache.NewTimedCache(5*time.Minute, func(key string) (interface{}, error) {
-		return nil, nil
-	}, false)
-	if err != nil {
+	getter := func(key string) (interface{}, error) { return nil, nil }
+	var err error
+	if driver.throttlingCache, err = azcache.NewTimedCache(5*time.Minute, getter, false); err != nil {
 		klog.Fatalf("%v", err)
 	}
-	driver.throttlingCache = cache
+	if driver.checkDiskLunThrottlingCache, err = azcache.NewTimedCache(30*time.Minute, getter, false); err != nil {
+		klog.Fatalf("%v", err)
+	}
+	if options.VolStatsCacheExpireInMinutes <= 0 {
+		options.VolStatsCacheExpireInMinutes = 10 // default expire in 10 minutes
+	}
+	if driver.volStatsCache, err = azcache.NewTimedCache(time.Duration(options.VolStatsCacheExpireInMinutes)*time.Minute, getter, false); err != nil {
+		klog.Fatalf("%v", err)
+	}
 	return &driver
 }
 
@@ -504,7 +520,7 @@ func (d *DriverCore) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeN
 	for _, va := range volumeAttachments.Items {
 		klog.V(6).Infof("attacher: %s, nodeName: %s, Status: %v, PV: %s, attachmentMetadata: %v", va.Spec.Attacher, va.Spec.NodeName,
 			va.Status.Attached, pointer.StringDeref(va.Spec.Source.PersistentVolumeName, ""), va.Status.AttachmentMetadata)
-		if va.Spec.Attacher == consts.DefaultDriverName && strings.EqualFold(va.Spec.NodeName, nodeName) && va.Status.Attached {
+		if va.Spec.Attacher == d.Name && strings.EqualFold(va.Spec.NodeName, nodeName) && va.Status.Attached {
 			if k, ok := va.Status.AttachmentMetadata[consts.LUN]; ok {
 				lun, err := strconv.Atoi(k)
 				if err != nil {

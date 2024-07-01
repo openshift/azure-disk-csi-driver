@@ -44,6 +44,7 @@ var (
 	kubeconfig                   = flag.String("kubeconfig", "", "Absolute path to the kubeconfig file. Required only when running out of cluster.")
 	driverName                   = flag.String("drivername", consts.DefaultDriverName, "name of the driver")
 	volumeAttachLimit            = flag.Int64("volume-attach-limit", -1, "maximum number of attachable volumes per node")
+	reservedDataDiskSlotNum      = flag.Int64("reserved-data-disk-slot-num", 0, "reserved data disk slot number per node")
 	supportZone                  = flag.Bool("support-zone", true, "boolean flag to get zone info in NodeGetInfo")
 	getNodeInfoFromLabels        = flag.Bool("get-node-info-from-labels", false, "boolean flag to get zone info from node labels in NodeGetInfo")
 	getNodeIDFromIMDS            = flag.Bool("get-nodeid-from-imds", false, "boolean flag to get NodeID from IMDS")
@@ -69,7 +70,7 @@ var (
 	enableWindowsHostProcess     = flag.Bool("enable-windows-host-process", false, "enable windows host process")
 	enableOtelTracing            = flag.Bool("enable-otel-tracing", false, "If set, enable opentelemetry tracing for the driver. The tracing is disabled by default. Configure the exporter endpoint with OTEL_EXPORTER_OTLP_ENDPOINT and other env variables, see https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#general-sdk-configuration.")
 	waitForSnapshotReady         = flag.Bool("wait-for-snapshot-ready", true, "boolean flag to wait for snapshot ready when creating snapshot in same region")
-	checkDiskLUNCollision        = flag.Bool("check-disk-lun-collision", false, "boolean flag to check disk lun collisio before attaching disk")
+	checkDiskLUNCollision        = flag.Bool("check-disk-lun-collision", true, "boolean flag to check disk lun collisio before attaching disk")
 )
 
 func main() {
@@ -112,6 +113,7 @@ func handle() {
 		NodeID:                       *nodeID,
 		DriverName:                   *driverName,
 		VolumeAttachLimit:            *volumeAttachLimit,
+		ReservedDataDiskSlotNum:      *reservedDataDiskSlotNum,
 		EnablePerfOptimization:       *enablePerfOptimization,
 		CloudConfigSecretName:        *cloudConfigSecretName,
 		CloudConfigSecretNamespace:   *cloudConfigSecretNamespace,

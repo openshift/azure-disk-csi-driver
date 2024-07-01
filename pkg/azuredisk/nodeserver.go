@@ -392,7 +392,7 @@ func (d *Driver) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest) (*c
 		if instanceType == "" {
 			instanceType = instanceTypeFromLabels
 		}
-		maxDataDiskCount = getMaxDataDiskCount(instanceType)
+		maxDataDiskCount = getMaxDataDiskCount(instanceType) - d.ReservedDataDiskSlotNum
 	}
 
 	nodeID := d.NodeID
@@ -444,7 +444,10 @@ func (d *Driver) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeS
 		return nil, status.Error(codes.InvalidArgument, "NodeGetVolumeStats volume path was empty")
 	}
 
-	volUsage, err := GetVolumeStats(ctx, d.mounter, req.VolumePath, d.hostUtil)
+	volUsage, err := d.GetVolumeStats(ctx, d.mounter, req.VolumeId, req.VolumePath, d.hostUtil)
+	if err != nil {
+		klog.Errorf("NodeGetVolumeStats: failed to get volume stats for volume %s path %s: %v", req.VolumeId, req.VolumePath, err)
+	}
 	return &csi.NodeGetVolumeStatsResponse{
 		Usage: volUsage,
 	}, err
@@ -510,6 +513,10 @@ func (d *Driver) NodeExpandVolume(_ context.Context, req *csi.NodeExpandVolumeRe
 		klog.Errorf("%v, will continue checking whether the volume has been resized", retErr)
 	}
 
+	if runtime.GOOS == "windows" && d.enableWindowsHostProcess {
+		// in windows host process mode, this driver could get the volume size from the volume path
+		devicePath = volumePath
+	}
 	gotBlockSizeBytes, err := getBlockSizeBytes(devicePath, d.mounter)
 	if err != nil {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("could not get size of block volume at path %s: %v", devicePath, err))

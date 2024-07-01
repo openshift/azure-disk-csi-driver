@@ -175,7 +175,7 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 	az := &azure.Cloud{}
 	if kubeClient != nil {
 		klog.V(2).Infof("reading cloud config from secret %s/%s", secretNamespace, secretName)
-		config, err := configloader.Load[azure.Config](ctx, &configloader.K8sSecretLoaderConfig{
+		config, err = configloader.Load[azure.Config](ctx, &configloader.K8sSecretLoaderConfig{
 			K8sSecretConfig: configloader.K8sSecretConfig{
 				SecretName:      secretName,
 				SecretNamespace: secretNamespace,
@@ -242,6 +242,17 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 			trafficMgrAddr := fmt.Sprintf("http://localhost:%d/", trafficMgrPort)
 			klog.V(2).Infof("set ResourceManagerEndpoint as %s", trafficMgrAddr)
 			config.ResourceManagerEndpoint = trafficMgrAddr
+		}
+		// these environment variables are injected by workload identity webhook
+		if tenantID := os.Getenv("AZURE_TENANT_ID"); tenantID != "" {
+			config.TenantID = tenantID
+		}
+		if clientID := os.Getenv("AZURE_CLIENT_ID"); clientID != "" {
+			config.AADClientID = clientID
+		}
+		if federatedTokenFile := os.Getenv("AZURE_FEDERATED_TOKEN_FILE"); federatedTokenFile != "" {
+			config.AADFederatedTokenFile = federatedTokenFile
+			config.UseFederatedWorkloadIdentityExtension = true
 		}
 		if err = az.InitializeCloudFromConfig(ctx, config, fromSecret, false); err != nil {
 			klog.Warningf("InitializeCloudFromConfig failed with error: %v", err)
@@ -794,11 +805,33 @@ func InsertDiskProperties(disk *compute.Disk, publishConext map[string]string) {
 	}
 }
 
-func SleepIfThrottled(err error, sleepSec int) {
+func SleepIfThrottled(err error, defaultSleepSec int) {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(consts.TooManyRequests)) || strings.Contains(strings.ToLower(err.Error()), consts.ClientThrottled) {
-		klog.Warningf("sleep %d more seconds, waiting for throttling complete", sleepSec)
-		time.Sleep(time.Duration(sleepSec) * time.Second)
+		retryAfter := getRetryAfterSeconds(err)
+		if retryAfter == 0 {
+			retryAfter = defaultSleepSec
+		}
+		klog.Warningf("sleep %d more seconds, waiting for throttling complete", retryAfter)
+		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
+}
+
+// getRetryAfterSeconds returns the number of seconds to wait from the error message
+func getRetryAfterSeconds(err error) int {
+	if err == nil {
+		return 0
+	}
+	re := regexp.MustCompile(`RetryAfter: (\d+)s`)
+	match := re.FindStringSubmatch(err.Error())
+	if len(match) > 1 {
+		if retryAfter, err := strconv.Atoi(match[1]); err == nil {
+			if retryAfter > consts.MaxThrottlingSleepSec {
+				return consts.MaxThrottlingSleepSec
+			}
+			return retryAfter
+		}
+	}
+	return 0
 }
 
 // SetKeyValueInMap set key/value pair in map
@@ -823,6 +856,6 @@ func RunPowershellCmd(command string, envs ...string) ([]byte, error) {
 
 	cmd := exec.Command("powershell", "-Mta", "-NoProfile", "-Command", command)
 	cmd.Env = append(os.Environ(), envs...)
-	klog.V(8).Infof("Executing command: %q", cmd.String())
+	klog.V(6).Infof("Executing command: %q", cmd.String())
 	return cmd.CombinedOutput()
 }
