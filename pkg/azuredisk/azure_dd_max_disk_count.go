@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// DUMMY CHANGE
+
 package azuredisk
 
 // about how to get all VM size list,
