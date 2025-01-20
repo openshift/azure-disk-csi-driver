@@ -341,6 +341,12 @@ github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/selinux v1.11.0 h1:+5Zbo97w3Lbmb3PeqQtpmTkMwsW5nRI3YaLpt7tQ7oU=
 github.com/opencontainers/selinux v1.11.0/go.mod h1:E5dMC3VPuVvVHDYmi78qvhJp8+M586T4DlDRYpFkyec=
+github.com/openshift/cloud-provider-azure v0.7.5-0.20250121174137-6424726dc9df h1:Xqms0ctUmFt+vM4OECL8VeUKx66qxeDSrUyaQaCIddA=
+github.com/openshift/cloud-provider-azure v0.7.5-0.20250121174137-6424726dc9df/go.mod h1:WcvFUxTo9ZR/QbnSuFfqAz//TiZOgY/kzzvsyJ3hoPE=
+github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20250121174137-6424726dc9df h1:ELJAgmt2LixcJmGleaLdG2moVOK0SSZzSQQfRzOg9nI=
+github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20250121174137-6424726dc9df/go.mod h1:uejvbrWwN4pkzgO8OXL3WKDEumHG5C+LwqUliTxnQeY=
+github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20250121174137-6424726dc9df h1:sP4zY7BuVtrDGovVhLfPJcJ+mSOqVFEWkaO4xyxpgGs=
+github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20250121174137-6424726dc9df/go.mod h1:W+JWjqJLOncd2TR6yaMFOHcOfBfe7KvK2K2TovVexeo=
 github.com/orisano/pixelmatch v0.0.0-20220722002657-fb0b55479cde/go.mod h1:nZgzbfBr3hhjoZnS66nKrHmduYNpc34ny7RK4z5/HM0=
 github.com/peterbourgon/diskv v2.0.1+incompatible/go.mod h1:uqqh8zWWbv1HBMNONnaR/tNboyR3/BZd58JJSHlUSCU=
 github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c h1:+mdjkGKdHQG3305AYmdv1U2eRNDiU2ErMBj1gwrq8eQ=
@@ -782,12 +788,6 @@ k8s.io/utils v0.0.0-20241104163129-6fe5fd82f078 h1:jGnCPejIetjiy2gqaJ5V0NLwTpF4w
 k8s.io/utils v0.0.0-20241104163129-6fe5fd82f078/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.30.3 h1:2770sDpzrjjsAtVhSeUFseziht227YAWYHLGNM8QPwY=
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.30.3/go.mod h1:Ve9uj1L+deCXFrPOk1LpFXqTg7LCFzFso6PA48q/XZw=
-sigs.k8s.io/cloud-provider-azure v1.29.1-0.20241111034044-6ebb6c3c3260 h1:fojDjExSwK4UcEV5uGBNiGp55uly70rp9k7+YXhNjXI=
-sigs.k8s.io/cloud-provider-azure v1.29.1-0.20241111034044-6ebb6c3c3260/go.mod h1:mHnDlABcVBbkfA9qNFIYeFcEOritZWoJkpUylkIA7Mo=
-sigs.k8s.io/cloud-provider-azure/pkg/azclient v0.1.17 h1:xl40PwT1GmKqDjHtJQ1V7JQFlmyzwFvR2uxucCQwc4c=
-sigs.k8s.io/cloud-provider-azure/pkg/azclient v0.1.17/go.mod h1:P9bc1WdAEjxt/o9D2eBKGyrtHAkBMe/Qyl0baTMUC0g=
-sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader v0.1.3 h1:IiAbtW5mYf2d9sOejwBxOXm5+DxcYEOrslt909e6Sio=
-sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader v0.1.3/go.mod h1:6xHgJ5wg7E/hQO578W6n2zmlqhSDByHoh52pMDudtWQ=
 sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd h1:EDPBXCAspyGV4jQlpZSudPeMmr1bNJefnuqLsRAsHZo=
 sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd/go.mod h1:B8JuhiUyNFVKdsE8h686QcCxMaH6HrOAZj4vswFpcB0=
 sigs.k8s.io/structured-merge-diff/v4 v4.2.3/go.mod h1:qjx8mGObPmV2aSZepjQjbmb2ihdVs8cGKBraizNC69E=

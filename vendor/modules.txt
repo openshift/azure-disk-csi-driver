@@ -1648,8 +1648,8 @@ sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client/metrics
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/common/metrics
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client
-# sigs.k8s.io/cloud-provider-azure v1.29.1-0.20241111034044-6ebb6c3c3260
-## explicit; go 1.23.1
+# sigs.k8s.io/cloud-provider-azure v1.29.1-0.20241111034044-6ebb6c3c3260 => github.com/openshift/cloud-provider-azure v0.7.5-0.20250121174137-6424726dc9df
+## explicit; go 1.22.9
 sigs.k8s.io/cloud-provider-azure/pkg/azureclients
 sigs.k8s.io/cloud-provider-azure/pkg/azureclients/armauth
 sigs.k8s.io/cloud-provider-azure/pkg/azureclients/armclient
@@ -1703,8 +1703,8 @@ sigs.k8s.io/cloud-provider-azure/pkg/util/string
 sigs.k8s.io/cloud-provider-azure/pkg/util/taints
 sigs.k8s.io/cloud-provider-azure/pkg/util/vm
 sigs.k8s.io/cloud-provider-azure/pkg/version
-# sigs.k8s.io/cloud-provider-azure/pkg/azclient v0.1.17
-## explicit; go 1.23.1
+# sigs.k8s.io/cloud-provider-azure/pkg/azclient v0.1.17 => github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20250121174137-6424726dc9df
+## explicit; go 1.22.9
 sigs.k8s.io/cloud-provider-azure/pkg/azclient
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/accountclient
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/armauth
@@ -1756,8 +1756,8 @@ sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetvmclient
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualnetworkclient
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualnetworklinkclient
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualnetworklinkclient/mock_virtualnetworklinkclient
-# sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader v0.1.3
-## explicit; go 1.23.1
+# sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader v0.1.3 => github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20250121174137-6424726dc9df
+## explicit; go 1.22.9
 sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader
 # sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd
 ## explicit; go 1.18
@@ -1804,3 +1804,6 @@ sigs.k8s.io/yaml/goyaml.v2
 # k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.31.2
 # k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.31.2
 # k8s.io/sample-controller => k8s.io/sample-controller v0.31.2
+# sigs.k8s.io/cloud-provider-azure => github.com/openshift/cloud-provider-azure v0.7.5-0.20250121174137-6424726dc9df
+# sigs.k8s.io/cloud-provider-azure/pkg/azclient => github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20250121174137-6424726dc9df
+# sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader => github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20250121174137-6424726dc9df

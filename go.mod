@@ -1,6 +1,6 @@
 module sigs.k8s.io/azuredisk-csi-driver
 
-go 1.23.1
+go 1.22.9
 
 require (
 	github.com/Azure/azure-sdk-for-go v68.0.0+incompatible
@@ -199,4 +199,8 @@ replace (
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.31.2
 	k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.31.2
 	k8s.io/sample-controller => k8s.io/sample-controller v0.31.2
+
+	sigs.k8s.io/cloud-provider-azure => github.com/openshift/cloud-provider-azure v0.7.5-0.20250121174137-6424726dc9df
+	sigs.k8s.io/cloud-provider-azure/pkg/azclient => github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20250121174137-6424726dc9df
+	sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader => github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20250121174137-6424726dc9df
 )
