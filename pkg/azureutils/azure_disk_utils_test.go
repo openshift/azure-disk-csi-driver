@@ -23,12 +23,12 @@ import (
 	"os"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute" //nolint: staticcheck
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,42 +132,42 @@ func TestCheckDiskName(t *testing.T) {
 func TestGetCachingMode(t *testing.T) {
 	tests := []struct {
 		options             map[string]string
-		expectedCachingMode compute.CachingTypes
+		expectedCachingMode armcompute.CachingTypes
 		expectedError       bool
 	}{
 		{
 			nil,
-			compute.CachingTypes(defaultAzureDataDiskCachingMode),
+			armcompute.CachingTypes(defaultAzureDataDiskCachingMode),
 			false,
 		},
 		{
 			map[string]string{},
-			compute.CachingTypes(defaultAzureDataDiskCachingMode),
+			armcompute.CachingTypes(defaultAzureDataDiskCachingMode),
 			false,
 		},
 		{
 			map[string]string{consts.CachingModeField: ""},
-			compute.CachingTypes(defaultAzureDataDiskCachingMode),
+			armcompute.CachingTypes(defaultAzureDataDiskCachingMode),
 			false,
 		},
 		{
 			map[string]string{consts.CachingModeField: "None"},
-			compute.CachingTypes("None"),
+			armcompute.CachingTypes("None"),
 			false,
 		},
 		{
 			map[string]string{consts.CachingModeField: "ReadOnly"},
-			compute.CachingTypes("ReadOnly"),
+			armcompute.CachingTypes("ReadOnly"),
 			false,
 		},
 		{
 			map[string]string{consts.CachingModeField: "ReadWrite"},
-			compute.CachingTypes("ReadWrite"),
+			armcompute.CachingTypes("ReadWrite"),
 			false,
 		},
 		{
 			map[string]string{consts.CachingModeField: "WriteOnly"},
-			compute.CachingTypes(""),
+			armcompute.CachingTypes(""),
 			true,
 		},
 	}
@@ -176,92 +176,6 @@ func TestGetCachingMode(t *testing.T) {
 		resultCachingMode, resultError := GetCachingMode(test.options)
 		if resultCachingMode != test.expectedCachingMode || (resultError != nil) != test.expectedError {
 			t.Errorf("input: %s, getCachingMode resultCachingMode: %s, expectedCachingMode: %s, resultError: %s, expectedError: %t", test.options, resultCachingMode, test.expectedCachingMode, resultError, test.expectedError)
-		}
-	}
-}
-
-func TestGetKubeConfig(t *testing.T) {
-	// skip for now as this is very flaky on Windows
-	skipIfTestingOnWindows(t)
-	emptyKubeConfig := "empty-Kube-Config"
-	validKubeConfig := "valid-Kube-Config"
-	fakeContent := `
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://localhost:8080
-  name: foo-cluster
-contexts:
-- context:
-    cluster: foo-cluster
-    user: foo-user
-    namespace: bar
-  name: foo-context
-current-context: foo-context
-kind: Config
-users:
-- name: foo-user
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1beta1
-      args:
-      - arg-1
-      - arg-2
-      command: foo-command
-`
-
-	err := createTestFile(emptyKubeConfig)
-	if err != nil {
-		t.Error(err)
-	}
-	defer func() {
-		if err := os.Remove(emptyKubeConfig); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	err = createTestFile(validKubeConfig)
-	if err != nil {
-		t.Error(err)
-	}
-	defer func() {
-		if err := os.Remove(validKubeConfig); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	if err := os.WriteFile(validKubeConfig, []byte(fakeContent), 0666); err != nil {
-		t.Error(err)
-	}
-
-	tests := []struct {
-		desc                     string
-		kubeconfig               string
-		expectError              bool
-		envVariableHasConfig     bool
-		envVariableConfigIsValid bool
-	}{
-		{
-			desc:                     "[success] valid kube config passed",
-			kubeconfig:               validKubeConfig,
-			expectError:              false,
-			envVariableHasConfig:     false,
-			envVariableConfigIsValid: false,
-		},
-		{
-			desc:                     "[failure] invalid kube config passed",
-			kubeconfig:               emptyKubeConfig,
-			expectError:              true,
-			envVariableHasConfig:     false,
-			envVariableConfigIsValid: false,
-		},
-	}
-
-	for _, test := range tests {
-		_, err := GetKubeConfig(test.kubeconfig)
-		receiveError := (err != nil)
-		if test.expectError != receiveError {
-			t.Errorf("desc: %s,\n input: %q, GetCloudProvider err: %v, expectErr: %v", test.desc, test.kubeconfig, err, test.expectError)
 		}
 	}
 }
@@ -338,7 +252,7 @@ users:
 			desc:                  "[failure] out of cluster & in cluster, specify a empty kubeconfig, no credential file",
 			kubeconfig:            emptyKubeConfig,
 			allowEmptyCloudConfig: true,
-			expectedErr:           fmt.Errorf("failed to get KubeClient: invalid configuration: no configuration has been provided, try setting KUBERNETES_MASTER environment variable"),
+			expectedErr:           fmt.Errorf("invalid configuration: no configuration has been provided, try setting KUBERNETES_MASTER environment variable"),
 		},
 		{
 			desc:                  "[success] out of cluster & in cluster, no kubeconfig, a fake credential file",
@@ -393,8 +307,15 @@ users:
 				t.Error(err)
 			}
 		}
-		cloud, err := GetCloudProvider(context.Background(), test.kubeconfig, "", "", test.userAgent, test.allowEmptyCloudConfig, false, -1)
-		if !reflect.DeepEqual(err, test.expectedErr) && !strings.Contains(err.Error(), test.expectedErr.Error()) {
+
+		kubeClient, err := GetKubeClient(test.kubeconfig)
+		if err != nil {
+			if ((err == nil) == (test.expectedErr == nil)) && !reflect.DeepEqual(err, test.expectedErr) && !strings.Contains(err.Error(), test.expectedErr.Error()) {
+				t.Errorf("desc: %s,\n input: %q, GetCloudProvider err: %v, expectedErr: %v", test.desc, test.kubeconfig, err, test.expectedErr)
+			}
+		}
+		cloud, err := GetCloudProviderFromClient(context.Background(), kubeClient, "", "", test.userAgent, test.allowEmptyCloudConfig, false, -1)
+		if ((err == nil) == (test.expectedErr == nil)) && !reflect.DeepEqual(err, test.expectedErr) && !strings.Contains(err.Error(), test.expectedErr.Error()) {
 			t.Errorf("desc: %s,\n input: %q, GetCloudProvider err: %v, expectedErr: %v", test.desc, test.kubeconfig, err, test.expectedErr)
 		}
 		if cloud != nil {
@@ -648,13 +569,13 @@ func TestGetSourceVolumeID(t *testing.T) {
 	SourceResourceID := "test"
 
 	tests := []struct {
-		snapshot *compute.Snapshot
+		snapshot *armcompute.Snapshot
 		expected string
 	}{
 		{
-			snapshot: &compute.Snapshot{
-				SnapshotProperties: &compute.SnapshotProperties{
-					CreationData: &compute.CreationData{
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					CreationData: &armcompute.CreationData{
 						SourceResourceID: &SourceResourceID,
 					},
 				},
@@ -662,21 +583,21 @@ func TestGetSourceVolumeID(t *testing.T) {
 			expected: "test",
 		},
 		{
-			snapshot: &compute.Snapshot{
-				SnapshotProperties: &compute.SnapshotProperties{
-					CreationData: &compute.CreationData{},
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					CreationData: &armcompute.CreationData{},
 				},
 			},
 			expected: "",
 		},
 		{
-			snapshot: &compute.Snapshot{
-				SnapshotProperties: &compute.SnapshotProperties{},
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{},
 			},
 			expected: "",
 		},
 		{
-			snapshot: &compute.Snapshot{},
+			snapshot: &armcompute.Snapshot{},
 			expected: "",
 		},
 		{
@@ -702,7 +623,7 @@ func TestGetValidCreationData(t *testing.T) {
 		resourceGroup    string
 		sourceResourceID string
 		sourceType       string
-		expected1        compute.CreationData
+		expected1        armcompute.CreationData
 		expected2        error
 	}{
 		{
@@ -710,8 +631,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "",
 			sourceType:       "",
-			expected1: compute.CreationData{
-				CreateOption: compute.Empty,
+			expected1: armcompute.CreationData{
+				CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
 			},
 			expected2: nil,
 		},
@@ -720,8 +641,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx",
 			sourceType:       consts.SourceSnapshot,
-			expected1: compute.CreationData{
-				CreateOption:     compute.Copy,
+			expected1: armcompute.CreationData{
+				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
 				SourceResourceID: &sourceResourceSnapshotID,
 			},
 			expected2: nil,
@@ -731,8 +652,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "xxx",
 			sourceResourceID: "xxx",
 			sourceType:       consts.SourceSnapshot,
-			expected1: compute.CreationData{
-				CreateOption:     compute.Copy,
+			expected1: armcompute.CreationData{
+				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
 				SourceResourceID: &sourceResourceSnapshotID,
 			},
 			expected2: nil,
@@ -742,7 +663,7 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/23/providers/Microsoft.Compute/disks/name",
 			sourceType:       consts.SourceSnapshot,
-			expected1:        compute.CreationData{},
+			expected1:        armcompute.CreationData{},
 			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots//subscriptions/23/providers/Microsoft.Compute/disks/name", diskSnapshotPathRE),
 		},
 		{
@@ -750,7 +671,7 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "http://test.com/vhds/name",
 			sourceType:       consts.SourceSnapshot,
-			expected1:        compute.CreationData{},
+			expected1:        armcompute.CreationData{},
 			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots/http://test.com/vhds/name", diskSnapshotPathRE),
 		},
 		{
@@ -758,7 +679,7 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/xxx/snapshots/xxx",
 			sourceType:       consts.SourceSnapshot,
-			expected1:        compute.CreationData{},
+			expected1:        armcompute.CreationData{},
 			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots//subscriptions/xxx/snapshots/xxx", diskSnapshotPathRE),
 		},
 		{
@@ -766,7 +687,7 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx/snapshots/xxx/snapshots/xxx",
 			sourceType:       consts.SourceSnapshot,
-			expected1:        compute.CreationData{},
+			expected1:        armcompute.CreationData{},
 			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx/snapshots/xxx/snapshots/xxx", diskSnapshotPathRE),
 		},
 		{
@@ -774,8 +695,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "xxx",
 			sourceType:       "",
-			expected1: compute.CreationData{
-				CreateOption: compute.Empty,
+			expected1: armcompute.CreationData{
+				CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
 			},
 			expected2: nil,
 		},
@@ -784,8 +705,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/disks/xxx",
 			sourceType:       consts.SourceVolume,
-			expected1: compute.CreationData{
-				CreateOption:     compute.Copy,
+			expected1: armcompute.CreationData{
+				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
 				SourceResourceID: &sourceResourceVolumeID,
 			},
 			expected2: nil,
@@ -795,8 +716,8 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "xxx",
 			sourceResourceID: "xxx",
 			sourceType:       consts.SourceVolume,
-			expected1: compute.CreationData{
-				CreateOption:     compute.Copy,
+			expected1: armcompute.CreationData{
+				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
 				SourceResourceID: &sourceResourceVolumeID,
 			},
 			expected2: nil,
@@ -806,7 +727,7 @@ func TestGetValidCreationData(t *testing.T) {
 			resourceGroup:    "",
 			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx",
 			sourceType:       consts.SourceVolume,
-			expected1:        compute.CreationData{},
+			expected1:        armcompute.CreationData{},
 			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/disks//subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx", consts.ManagedDiskPathRE),
 		},
 	}
@@ -1274,37 +1195,37 @@ func TestValidateDataAccessAuthMode(t *testing.T) {
 func TestNormalizeNetworkAccessPolicy(t *testing.T) {
 	tests := []struct {
 		networkAccessPolicy         string
-		expectedNetworkAccessPolicy compute.NetworkAccessPolicy
+		expectedNetworkAccessPolicy armcompute.NetworkAccessPolicy
 		expectError                 bool
 	}{
 		{
 			networkAccessPolicy:         "",
-			expectedNetworkAccessPolicy: compute.NetworkAccessPolicy(""),
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicy(""),
 			expectError:                 false,
 		},
 		{
 			networkAccessPolicy:         "AllowAll",
-			expectedNetworkAccessPolicy: compute.AllowAll,
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicyAllowAll,
 			expectError:                 false,
 		},
 		{
 			networkAccessPolicy:         "DenyAll",
-			expectedNetworkAccessPolicy: compute.DenyAll,
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicyDenyAll,
 			expectError:                 false,
 		},
 		{
 			networkAccessPolicy:         "AllowPrivate",
-			expectedNetworkAccessPolicy: compute.AllowPrivate,
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicyAllowPrivate,
 			expectError:                 false,
 		},
 		{
 			networkAccessPolicy:         "allowAll",
-			expectedNetworkAccessPolicy: compute.NetworkAccessPolicy(""),
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicy(""),
 			expectError:                 true,
 		},
 		{
 			networkAccessPolicy:         "invalid",
-			expectedNetworkAccessPolicy: compute.NetworkAccessPolicy(""),
+			expectedNetworkAccessPolicy: armcompute.NetworkAccessPolicy(""),
 			expectError:                 true,
 		},
 	}
@@ -1319,32 +1240,32 @@ func TestNormalizeNetworkAccessPolicy(t *testing.T) {
 func TestNormalizePublicNetworkAccess(t *testing.T) {
 	tests := []struct {
 		publicNetworkAccess         string
-		expectedPublicNetworkAccess compute.PublicNetworkAccess
+		expectedPublicNetworkAccess armcompute.PublicNetworkAccess
 		expectError                 bool
 	}{
 		{
 			publicNetworkAccess:         "",
-			expectedPublicNetworkAccess: compute.PublicNetworkAccess(""),
+			expectedPublicNetworkAccess: armcompute.PublicNetworkAccess(""),
 			expectError:                 false,
 		},
 		{
 			publicNetworkAccess:         "Enabled",
-			expectedPublicNetworkAccess: compute.Enabled,
+			expectedPublicNetworkAccess: armcompute.PublicNetworkAccessEnabled,
 			expectError:                 false,
 		},
 		{
 			publicNetworkAccess:         "Disabled",
-			expectedPublicNetworkAccess: compute.Disabled,
+			expectedPublicNetworkAccess: armcompute.PublicNetworkAccessDisabled,
 			expectError:                 false,
 		},
 		{
 			publicNetworkAccess:         "enabled",
-			expectedPublicNetworkAccess: compute.PublicNetworkAccess(""),
+			expectedPublicNetworkAccess: armcompute.PublicNetworkAccess(""),
 			expectError:                 true,
 		},
 		{
 			publicNetworkAccess:         "disabled",
-			expectedPublicNetworkAccess: compute.PublicNetworkAccess(""),
+			expectedPublicNetworkAccess: armcompute.PublicNetworkAccess(""),
 			expectError:                 true,
 		},
 	}
@@ -1361,21 +1282,21 @@ func TestNormalizeStorageAccountType(t *testing.T) {
 		cloud                  string
 		storageAccountType     string
 		disableAzureStackCloud bool
-		expectedAccountType    compute.DiskStorageAccountTypes
+		expectedAccountType    armcompute.DiskStorageAccountTypes
 		expectError            bool
 	}{
 		{
 			cloud:                  azurePublicCloud,
 			storageAccountType:     "",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.StandardSSDLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesStandardSSDLRS,
 			expectError:            false,
 		},
 		{
 			cloud:                  azureStackCloud,
 			storageAccountType:     "",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.StandardLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesStandardLRS,
 			expectError:            false,
 		},
 		{
@@ -1389,28 +1310,28 @@ func TestNormalizeStorageAccountType(t *testing.T) {
 			cloud:                  azurePublicCloud,
 			storageAccountType:     "Standard_LRS",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.StandardLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesStandardLRS,
 			expectError:            false,
 		},
 		{
 			cloud:                  azurePublicCloud,
 			storageAccountType:     "Premium_LRS",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.PremiumLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesPremiumLRS,
 			expectError:            false,
 		},
 		{
 			cloud:                  azurePublicCloud,
 			storageAccountType:     "StandardSSD_LRS",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.StandardSSDLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesStandardSSDLRS,
 			expectError:            false,
 		},
 		{
 			cloud:                  azurePublicCloud,
 			storageAccountType:     "UltraSSD_LRS",
 			disableAzureStackCloud: false,
-			expectedAccountType:    compute.UltraSSDLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesUltraSSDLRS,
 			expectError:            false,
 		},
 		{
@@ -1424,7 +1345,7 @@ func TestNormalizeStorageAccountType(t *testing.T) {
 			cloud:                  azureStackCloud,
 			storageAccountType:     "UltraSSD_LRS",
 			disableAzureStackCloud: true,
-			expectedAccountType:    compute.UltraSSDLRS,
+			expectedAccountType:    armcompute.DiskStorageAccountTypesUltraSSDLRS,
 			expectError:            false,
 		},
 	}
@@ -1531,14 +1452,34 @@ func TestParseDiskParameters(t *testing.T) {
 			expectedError: fmt.Errorf("cachingMode ReadOnly is not supported for PremiumV2_LRS"),
 		},
 		{
+			name:        "invalid DiskIOPSReadWriteField value in parameters",
+			inputParams: map[string]string{consts.DiskIOPSReadWriteField: "diskIOPSReadWrite"},
+			expectedOutput: ManagedDiskParameters{
+				Tags:           make(map[string]string),
+				VolumeContext:  map[string]string{consts.DiskIOPSReadWriteField: "diskIOPSReadWrite"},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: fmt.Errorf("parse diskiopsreadwrite:diskIOPSReadWrite failed with error: strconv.Atoi: parsing \"diskIOPSReadWrite\": invalid syntax"),
+		},
+		{
+			name:        "invalid DiskMBPSReadWriteField value in parameters",
+			inputParams: map[string]string{consts.DiskMBPSReadWriteField: "diskMBPSReadWrite"},
+			expectedOutput: ManagedDiskParameters{
+				Tags:           make(map[string]string),
+				VolumeContext:  map[string]string{consts.DiskMBPSReadWriteField: "diskMBPSReadWrite"},
+				DeviceSettings: make(map[string]string),
+			},
+			expectedError: fmt.Errorf("parse diskmbpsreadwrite:diskMBPSReadWrite failed with error: strconv.Atoi: parsing \"diskMBPSReadWrite\": invalid syntax"),
+		},
+		{
 			name: "valid parameters input",
 			inputParams: map[string]string{
 				consts.SkuNameField:             "skuName",
 				consts.LocationField:            "location",
 				consts.CachingModeField:         "cachingMode",
 				consts.ResourceGroupField:       "resourceGroup",
-				consts.DiskIOPSReadWriteField:   "diskIOPSReadWrite",
-				consts.DiskMBPSReadWriteField:   "diskMBPSReadWrite",
+				consts.DiskIOPSReadWriteField:   "4000",
+				consts.DiskMBPSReadWriteField:   "1000",
 				consts.LogicalSectorSizeField:   "1",
 				consts.DiskNameField:            "diskName",
 				consts.DesIDField:               "diskEncyptionSetID",
@@ -1563,8 +1504,8 @@ func TestParseDiskParameters(t *testing.T) {
 				Location:            "location",
 				CachingMode:         v1.AzureDataDiskCachingMode("cachingMode"),
 				ResourceGroup:       "resourceGroup",
-				DiskIOPSReadWrite:   "diskIOPSReadWrite",
-				DiskMBPSReadWrite:   "diskMBPSReadWrite",
+				DiskIOPSReadWrite:   "4000",
+				DiskMBPSReadWrite:   "1000",
 				DiskName:            "diskName",
 				DiskEncryptionSetID: "diskEncyptionSetID",
 				Tags: map[string]string{
@@ -1586,8 +1527,8 @@ func TestParseDiskParameters(t *testing.T) {
 					consts.LocationField:            "location",
 					consts.CachingModeField:         "cachingMode",
 					consts.ResourceGroupField:       "resourceGroup",
-					consts.DiskIOPSReadWriteField:   "diskIOPSReadWrite",
-					consts.DiskMBPSReadWriteField:   "diskMBPSReadWrite",
+					consts.DiskIOPSReadWriteField:   "4000",
+					consts.DiskMBPSReadWriteField:   "1000",
 					consts.LogicalSectorSizeField:   "1",
 					consts.DiskNameField:            "diskName",
 					consts.DesIDField:               "diskEncyptionSetID",
@@ -1754,16 +1695,10 @@ func createTestFile(path string) error {
 	return nil
 }
 
-func skipIfTestingOnWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping tests on Windows")
-	}
-}
-
 func TestInsertDiskProperties(t *testing.T) {
 	tests := []struct {
 		desc        string
-		disk        *compute.Disk
+		disk        *armcompute.Disk
 		inputMap    map[string]string
 		expectedMap map[string]string
 	}{
@@ -1772,37 +1707,37 @@ func TestInsertDiskProperties(t *testing.T) {
 		},
 		{
 			desc:        "empty",
-			disk:        &compute.Disk{},
+			disk:        &armcompute.Disk{},
 			inputMap:    map[string]string{},
 			expectedMap: map[string]string{},
 		},
 		{
 			desc: "skuName",
-			disk: &compute.Disk{
-				Sku: &compute.DiskSku{Name: compute.PremiumLRS},
+			disk: &armcompute.Disk{
+				SKU: &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypesPremiumLRS)},
 			},
 			inputMap:    map[string]string{},
-			expectedMap: map[string]string{"skuname": string(compute.PremiumLRS)},
+			expectedMap: map[string]string{"skuname": string(armcompute.DiskStorageAccountTypesPremiumLRS)},
 		},
 		{
 			desc: "DiskProperties",
-			disk: &compute.Disk{
-				Sku: &compute.DiskSku{Name: compute.StandardSSDLRS},
-				DiskProperties: &compute.DiskProperties{
-					NetworkAccessPolicy: compute.AllowPrivate,
+			disk: &armcompute.Disk{
+				SKU: &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypesStandardSSDLRS)},
+				Properties: &armcompute.DiskProperties{
+					NetworkAccessPolicy: to.Ptr(armcompute.NetworkAccessPolicyAllowPrivate),
 					DiskIOPSReadWrite:   ptr.To(int64(6400)),
 					DiskMBpsReadWrite:   ptr.To(int64(100)),
-					CreationData: &compute.CreationData{
+					CreationData: &armcompute.CreationData{
 						LogicalSectorSize: ptr.To(int32(512)),
 					},
-					Encryption: &compute.Encryption{DiskEncryptionSetID: ptr.To("/subs/DiskEncryptionSetID")},
+					Encryption: &armcompute.Encryption{DiskEncryptionSetID: ptr.To("/subs/DiskEncryptionSetID")},
 					MaxShares:  ptr.To(int32(3)),
 				},
 			},
 			inputMap: map[string]string{},
 			expectedMap: map[string]string{
-				consts.SkuNameField:             string(compute.StandardSSDLRS),
-				consts.NetworkAccessPolicyField: string(compute.AllowPrivate),
+				consts.SkuNameField:             string(armcompute.DiskStorageAccountTypesStandardSSDLRS),
+				consts.NetworkAccessPolicyField: string(armcompute.NetworkAccessPolicyAllowPrivate),
 				consts.DiskIOPSReadWriteField:   "6400",
 				consts.DiskMBPSReadWriteField:   "100",
 				consts.LogicalSectorSizeField:   "512",
@@ -1985,5 +1920,68 @@ func TestGetRetryAfterSeconds(t *testing.T) {
 			t.Errorf("desc: (%s), input: err(%v), getRetryAfterSeconds returned with int(%d), not equal to expected(%d)",
 				test.desc, test.err, result, test.expected)
 		}
+	}
+}
+
+func TestIsThrottlingError(t *testing.T) {
+	tests := []struct {
+		desc     string
+		err      error
+		expected bool
+	}{
+		{
+			desc:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			desc:     "no match",
+			err:      errors.New("no match"),
+			expected: false,
+		},
+		{
+			desc:     "match error message",
+			err:      errors.New("could not list storage accounts for account type Premium_LRS: Retriable: true, RetryAfter: 217s, HTTPStatusCode: 0, RawError: azure cloud provider throttled for operation StorageAccountListByResourceGroup with reason \"client throttled\""),
+			expected: true,
+		},
+		{
+			desc:     "match error message exceeds 1200s",
+			err:      errors.New("could not list storage accounts for account type Premium_LRS: Retriable: true, RetryAfter: 2170s, HTTPStatusCode: 0, RawError: azure cloud provider throttled for operation StorageAccountListByResourceGroup with reason \"client throttled\""),
+			expected: true,
+		},
+		{
+			desc:     "match error message with TooManyRequests throttling",
+			err:      errors.New("could not list storage accounts for account type Premium_LRS: Retriable: true, RetryAfter: 2170s, HTTPStatusCode: 429, RawError: azure cloud provider throttled for operation StorageAccountListByResourceGroup with reason \"TooManyRequests\""),
+			expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		result := IsThrottlingError(test.err)
+		if result != test.expected {
+			t.Errorf("desc: (%s), input: err(%v), IsThrottlingError returned with bool(%t), not equal to expected(%t)",
+				test.desc, test.err, result, test.expected)
+		}
+	}
+}
+
+func TestGenerateVolumeName(t *testing.T) {
+	// Normal operation, no truncate
+	v1 := GenerateVolumeName("kubernetes", "pv-cinder-abcde", 255)
+	if v1 != "kubernetes-dynamic-pv-cinder-abcde" {
+		t.Errorf("Expected kubernetes-dynamic-pv-cinder-abcde, got %s", v1)
+	}
+	// Truncate trailing "6789-dynamic"
+	prefix := strings.Repeat("0123456789", 9) // 90 characters prefix + 8 chars. of "-dynamic"
+	v2 := GenerateVolumeName(prefix, "pv-cinder-abcde", 100)
+	expect := prefix[:84] + "-pv-cinder-abcde"
+	if v2 != expect {
+		t.Errorf("Expected %s, got %s", expect, v2)
+	}
+	// Truncate really long cluster name
+	prefix = strings.Repeat("0123456789", 1000) // 10000 characters prefix
+	v3 := GenerateVolumeName(prefix, "pv-cinder-abcde", 100)
+	if v3 != expect {
+		t.Errorf("Expected %s, got %s", expect, v3)
 	}
 }

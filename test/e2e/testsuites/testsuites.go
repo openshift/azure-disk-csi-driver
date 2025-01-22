@@ -336,7 +336,7 @@ func generatePVC(namespace, storageClassName, name, claimSize string, volumeMode
 			AccessModes: []v1.PersistentVolumeAccessMode{
 				accessMode,
 			},
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceName(v1.ResourceStorage): resource.MustParse(claimSize),
 				},
@@ -818,7 +818,7 @@ func (t *TestPod) Create(ctx context.Context) {
 }
 
 func (t *TestPod) WaitForSuccess(ctx context.Context) {
-	err := e2epod.WaitForPodSuccessInNamespaceSlow(ctx, t.client, t.pod.Name, t.namespace.Name)
+	err := e2epod.WaitForPodSuccessInNamespaceTimeout(ctx, t.client, t.pod.Name, t.namespace.Name, 15*time.Minute)
 	framework.ExpectNoError(err)
 }
 

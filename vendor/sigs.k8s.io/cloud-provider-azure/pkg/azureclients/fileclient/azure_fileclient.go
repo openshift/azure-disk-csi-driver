@@ -24,7 +24,7 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	azclients "sigs.k8s.io/cloud-provider-azure/pkg/azureclients"
 	"sigs.k8s.io/cloud-provider-azure/pkg/metrics"
@@ -93,9 +93,10 @@ func (c *Client) CreateFileShare(ctx context.Context, resourceGroupName, account
 	if shareOptions == nil {
 		return storage.FileShare{}, fmt.Errorf("share options is nil")
 	}
-	quota := int32(shareOptions.RequestGiB)
-	fileShareProperties := &storage.FileShareProperties{
-		ShareQuota: &quota,
+	fileShareProperties := &storage.FileShareProperties{}
+	if shareOptions.RequestGiB > 0 {
+		quota := int32(shareOptions.RequestGiB)
+		fileShareProperties.ShareQuota = &quota
 	}
 	if shareOptions.Protocol == storage.EnabledProtocolsNFS {
 		fileShareProperties.EnabledProtocols = shareOptions.Protocol
@@ -219,7 +220,7 @@ func (c *Client) ListFileShare(ctx context.Context, resourceGroupName, accountNa
 		result = append(result, page.Values()...)
 
 		// Abort the loop when there's no nextLink in the response.
-		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+		if ptr.Deref(page.Response().NextLink, "") == "" {
 			break
 		}
 

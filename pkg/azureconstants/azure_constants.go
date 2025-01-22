@@ -55,8 +55,13 @@ const (
 	PvcNamespaceKey                   = "csi.storage.k8s.io/pvc/namespace"
 	PvcNamespaceTag                   = "kubernetes.io-created-for-pvc-namespace"
 	PvcNameTag                        = "kubernetes.io-created-for-pvc-name"
-	PvNameKey                         = "csi.storage.k8s.io/pv/name"
 	PvNameTag                         = "kubernetes.io-created-for-pv-name"
+	SnapshotNamespaceTag              = "kubernetes.io-created-for-snapshot-namespace"
+	SnapshotNameTag                   = "kubernetes.io-created-for-snapshot-name"
+	PvNameKey                         = "csi.storage.k8s.io/pv/name"
+	VolumeSnapshotNameKey             = "csi.storage.k8s.io/volumesnapshot/name"
+	VolumeSnapshotNamespaceKey        = "csi.storage.k8s.io/volumesnapshot/namespace"
+	VolumeSnapshotContentNameKey      = "csi.storage.k8s.io/volumesnapshotcontent/name"
 	RateLimited                       = "rate limited"
 	RequestedSizeGib                  = "requestedsizegib"
 	ResizeRequired                    = "resizeRequired"
@@ -96,10 +101,12 @@ const (
 	BlockDeviceRootPathLinux          = "/sys/block"
 	DummyBlockDevicePathLinux         = "/sys/block/sda"
 	// define different sleep time when hit throttling
-	SnapshotOpThrottlingSleepSec = 50
-	MaxThrottlingSleepSec        = 1200
+	SnapshotOpThrottlingSleepSec    = 50
+	MaxThrottlingSleepSec           = 1200
+	AgentNotReadyNodeTaintKeySuffix = "/agent-not-ready"
 	// define tag value delimiter and default is comma
 	TagValueDelimiterField = "tagvaluedelimiter"
+	AzureDiskDriverTag     = "kubernetes-azure-dd"
 )
 
 var (

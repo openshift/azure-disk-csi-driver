@@ -17,11 +17,13 @@ limitations under the License.
 package azclient
 
 import (
+	"os"
 	"strings"
+	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/policy/useragent"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
@@ -33,21 +35,52 @@ type ARMClientConfig struct {
 	// ResourceManagerEndpoint is the cloud's resource manager endpoint. If set, cloud provider queries this endpoint
 	// in order to generate an autorest.Environment instance instead of using one of the pre-defined Environments.
 	ResourceManagerEndpoint string `json:"resourceManagerEndpoint,omitempty" yaml:"resourceManagerEndpoint,omitempty"`
+	// The AAD Tenant ID for the Subscription that the cluster is deployed in
+	TenantID string `json:"tenantId,omitempty" yaml:"tenantId,omitempty"`
+	// The AAD Tenant ID for the Subscription that the network resources are deployed in.
+	NetworkResourceTenantID string `json:"networkResourceTenantID,omitempty" yaml:"networkResourceTenantID,omitempty"`
+	// Enable exponential backoff to manage resource request retries
+	CloudProviderBackoff bool `json:"cloudProviderBackoff,omitempty" yaml:"cloudProviderBackoff,omitempty"`
+	// Backoff retry limit
+	CloudProviderBackoffRetries int32 `json:"cloudProviderBackoffRetries,omitempty" yaml:"cloudProviderBackoffRetries,omitempty"`
+	// Backoff duration
+	CloudProviderBackoffDuration int `json:"cloudProviderBackoffDuration,omitempty" yaml:"cloudProviderBackoffDuration,omitempty"`
 }
 
-func NewClientOptionFromARMClientConfig(config *ARMClientConfig) (*policy.ClientOptions, error) {
-	//Get default settings
-	options := utils.GetDefaultOption()
-	var err error
-	if config != nil {
-		//update user agent header
-		options.ClientOptions.Telemetry.ApplicationID = strings.TrimSpace(config.UserAgent)
-		//set cloud
-		var cloudConfig *cloud.Configuration
-		cloudConfig, err = GetAzureCloudConfig(config)
-		options.ClientOptions.Cloud = *cloudConfig
-	} else {
-		options.ClientOptions.Cloud = cloud.AzurePublic
+func (config *ARMClientConfig) GetTenantID() string {
+	// these environment variables are injected by workload identity webhook
+	if tenantID := os.Getenv(utils.AzureTenantID); tenantID != "" {
+		return tenantID
 	}
-	return options, err
+	return config.TenantID
+}
+
+func GetAzCoreClientOption(armConfig *ARMClientConfig) (*policy.ClientOptions, error) {
+	//Get default settings
+	azCoreClientConfig := utils.GetDefaultAzCoreClientOption()
+	if armConfig != nil {
+		//update user agent header
+		if userAgent := strings.TrimSpace(armConfig.UserAgent); userAgent != "" {
+			azCoreClientConfig.Telemetry.Disabled = true
+			azCoreClientConfig.PerCallPolicies = append(azCoreClientConfig.PerCallPolicies, useragent.NewCustomUserAgentPolicy(userAgent))
+		}
+		//set cloud
+		cloudConfig, err := GetAzureCloudConfig(armConfig)
+		if err != nil {
+			return nil, err
+		}
+		azCoreClientConfig.Cloud = *cloudConfig
+		if armConfig.CloudProviderBackoff && armConfig.CloudProviderBackoffDuration > 0 {
+			azCoreClientConfig.Retry.RetryDelay = time.Duration(armConfig.CloudProviderBackoffDuration) * time.Second
+		}
+		if armConfig.CloudProviderBackoff && armConfig.CloudProviderBackoffRetries > 0 {
+			azCoreClientConfig.Retry.MaxRetries = armConfig.CloudProviderBackoffRetries
+		}
+
+	}
+	return &azCoreClientConfig, nil
+}
+
+func IsMultiTenant(armConfig *ARMClientConfig) bool {
+	return armConfig != nil && armConfig.NetworkResourceTenantID != "" && !strings.EqualFold(armConfig.NetworkResourceTenantID, armConfig.GetTenantID())
 }

@@ -22,30 +22,46 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
+	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/metrics"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
 type Client struct {
 	*armcompute.SSHPublicKeysClient
+	subscriptionID string
+	tracer         tracing.Tracer
 }
 
 func New(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Interface, error) {
 	if options == nil {
 		options = utils.GetDefaultOption()
 	}
+	tr := options.TracingProvider.NewTracer(utils.ModuleName, utils.ModuleVersion)
 
 	client, err := armcompute.NewSSHPublicKeysClient(subscriptionID, credential, options)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{client}, nil
+	return &Client{
+		SSHPublicKeysClient: client,
+		subscriptionID:      subscriptionID,
+		tracer:              tr,
+	}, nil
 }
 
-// Get gets the SSHPublicKeyResource
-func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.SSHPublicKeyResource, rerr error) {
+const GetOperationName = "SSHPublicKeysClient.Get"
 
+// Get gets the SSHPublicKeyResource
+func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.SSHPublicKeyResource, err error) {
+
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SSHPublicKeyResource", "get")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, GetOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := client.SSHPublicKeysClient.Get(ctx, resourceGroupName, resourceName, nil)
 	if err != nil {
 		return nil, err
@@ -54,8 +70,14 @@ func (client *Client) Get(ctx context.Context, resourceGroupName string, resourc
 	return &resp.SSHPublicKeyResource, nil
 }
 
+const ListOperationName = "SSHPublicKeysClient.List"
+
 // List gets a list of SSHPublicKeyResource in the resource group.
-func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.SSHPublicKeyResource, rerr error) {
+func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.SSHPublicKeyResource, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SSHPublicKeyResource", "list")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, ListOperationName, client.tracer, nil)
+	defer endSpan(err)
 	pager := client.SSHPublicKeysClient.NewListByResourceGroupPager(resourceGroupName, nil)
 	for pager.More() {
 		nextResult, err := pager.NextPage(ctx)

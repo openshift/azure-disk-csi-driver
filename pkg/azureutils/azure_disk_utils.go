@@ -18,7 +18,6 @@ package azureutils
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,20 +29,20 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute" //nolint: staticcheck
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/pborman/uuid"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	api "k8s.io/kubernetes/pkg/apis/core"
-	volumeUtil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/mount-utils"
 	"k8s.io/utils/ptr"
 	consts "sigs.k8s.io/azuredisk-csi-driver/pkg/azureconstants"
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/filewatcher"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader"
@@ -54,8 +53,8 @@ import (
 const (
 	azurePublicCloud                          = "AZUREPUBLICCLOUD"
 	azureStackCloud                           = "AZURESTACKCLOUD"
-	azurePublicCloudDefaultStorageAccountType = compute.StandardSSDLRS
-	azureStackCloudDefaultStorageAccountType  = compute.StandardLRS
+	azurePublicCloudDefaultStorageAccountType = armcompute.DiskStorageAccountTypesStandardSSDLRS
+	azureStackCloudDefaultStorageAccountType  = armcompute.DiskStorageAccountTypesStandardLRS
 	defaultAzureDataDiskCachingMode           = v1.AzureDataDiskCachingReadOnly
 	// default IOPS Caps & Throughput Cap (MBps) per https://docs.microsoft.com/en-us/azure/virtual-machines/linux/disks-ultra-ssd
 	// see https://docs.microsoft.com/en-us/rest/api/compute/disks/createorupdate#uri-parameters
@@ -116,7 +115,6 @@ type ManagedDiskParameters struct {
 	DiskIOPSReadWrite       string
 	DiskMBPSReadWrite       string
 	DiskName                string
-	EnableAsyncAttach       *bool
 	EnableBursting          *bool
 	PerformancePlus         *bool
 	FsType                  string
@@ -135,7 +133,7 @@ type ManagedDiskParameters struct {
 	Zoned                   string
 }
 
-func GetCachingMode(attributes map[string]string) (compute.CachingTypes, error) {
+func GetCachingMode(attributes map[string]string) (armcompute.CachingTypes, error) {
 	var (
 		cachingMode v1.AzureDataDiskCachingMode
 		err         error
@@ -149,7 +147,7 @@ func GetCachingMode(attributes map[string]string) (compute.CachingTypes, error) 
 	}
 
 	cachingMode, err = NormalizeCachingMode(cachingMode)
-	return compute.CachingTypes(cachingMode), err
+	return armcompute.CachingTypes(cachingMode), err
 }
 
 // GetAttachDiskInitialDelay gttachDiskInitialDelay from attributes
@@ -167,7 +165,7 @@ func GetAttachDiskInitialDelay(attributes map[string]string) int {
 }
 
 // GetCloudProviderFromClient get Azure Cloud Provider
-func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clientset, secretName, secretNamespace, userAgent string,
+func GetCloudProviderFromClient(ctx context.Context, kubeClient clientset.Interface, secretName, secretNamespace, userAgent string,
 	allowEmptyCloudConfig bool, enableTrafficMgr bool, trafficMgrPort int64) (*azure.Cloud, error) {
 	var config *azure.Config
 	var fromSecret bool
@@ -205,16 +203,9 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 			}
 			klog.V(2).Infof("use default %s env var: %v", consts.DefaultAzureCredentialFileEnv, credFile)
 		}
-
-		credFileConfig, err := os.Open(credFile)
+		config, err = configloader.Load[azure.Config](ctx, nil, &configloader.FileLoaderConfig{FilePath: credFile})
 		if err != nil {
 			klog.Warningf("load azure config from file(%s) failed with %v", credFile, err)
-		} else {
-			defer credFileConfig.Close()
-			klog.V(2).Infof("read cloud config from file: %s successfully", credFile)
-			if config, err = azure.ParseConfig(credFileConfig); err != nil {
-				klog.Warningf("parse config file(%s) failed with error: %v", credFile, err)
-			}
 		}
 	}
 
@@ -254,6 +245,11 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 			config.AADFederatedTokenFile = federatedTokenFile
 			config.UseFederatedWorkloadIdentityExtension = true
 		}
+		if len(config.AADClientCertPath) > 0 {
+			// Watch the certificate for changes; if the certificate changes, the pod will be restarted
+			err = filewatcher.WatchFileForChanges(config.AADClientCertPath)
+			klog.Warningf("Failed to watch certificate file for changes: %v", err)
+		}
 		if err = az.InitializeCloudFromConfig(ctx, config, fromSecret, false); err != nil {
 			klog.Warningf("InitializeCloudFromConfig failed with error: %v", err)
 		}
@@ -266,36 +262,8 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient *clientset.Clien
 	return az, nil
 }
 
-// GetCloudProviderFromConfig get Azure Cloud Provider
-func GetCloudProvider(ctx context.Context, kubeConfig, secretName, secretNamespace, userAgent string,
-	allowEmptyCloudConfig, enableTrafficMgr bool, trafficMgrPort int64) (*azure.Cloud, error) {
-	kubeClient, err := GetKubeClient(kubeConfig)
-	if err != nil {
-		klog.Warningf("get kubeconfig(%s) failed with error: %v", kubeConfig, err)
-		if !os.IsNotExist(err) && !errors.Is(err, rest.ErrNotInCluster) {
-			return nil, fmt.Errorf("failed to get KubeClient: %v", err)
-		}
-	}
-	return GetCloudProviderFromClient(ctx, kubeClient, secretName, secretNamespace, userAgent,
-		allowEmptyCloudConfig, enableTrafficMgr, trafficMgrPort)
-}
-
-// GetKubeConfig gets config object from config file
-func GetKubeConfig(kubeconfig string) (config *rest.Config, err error) {
-	if kubeconfig != "" {
-		if config, err = clientcmd.BuildConfigFromFlags("", kubeconfig); err != nil {
-			return nil, err
-		}
-	} else {
-		if config, err = rest.InClusterConfig(); err != nil {
-			return nil, err
-		}
-	}
-	return config, err
-}
-
-func GetKubeClient(kubeconfig string) (*clientset.Clientset, error) {
-	config, err := GetKubeConfig(kubeconfig)
+func GetKubeClient(kubeconfig string) (clientset.Interface, error) {
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +318,7 @@ func CreateValidDiskName(volumeName string) string {
 	}
 	if !checkDiskName(diskName) || len(diskName) < diskNameMinLength {
 		// todo: get cluster name
-		diskName = volumeUtil.GenerateVolumeName("pvc-disk", uuid.NewUUID().String(), diskNameGenerateMaxLength)
+		diskName = GenerateVolumeName("pvc-disk", string(uuid.NewUUID()), diskNameGenerateMaxLength)
 		klog.Warningf("the requested volume name (%q) is invalid, so it is regenerated as (%q)", volumeName, diskName)
 	}
 
@@ -402,10 +370,10 @@ func GetSubscriptionIDFromURI(diskURI string) string {
 	return ""
 }
 
-func GetValidCreationData(subscriptionID, resourceGroup, sourceResourceID, sourceType string) (compute.CreationData, error) {
+func GetValidCreationData(subscriptionID, resourceGroup, sourceResourceID, sourceType string) (armcompute.CreationData, error) {
 	if sourceResourceID == "" {
-		return compute.CreationData{
-			CreateOption: compute.Empty,
+		return armcompute.CreationData{
+			CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
 		}, nil
 	}
 
@@ -420,21 +388,21 @@ func GetValidCreationData(subscriptionID, resourceGroup, sourceResourceID, sourc
 			sourceResourceID = fmt.Sprintf(consts.ManagedDiskPath, subscriptionID, resourceGroup, sourceResourceID)
 		}
 	default:
-		return compute.CreationData{
-			CreateOption: compute.Empty,
+		return armcompute.CreationData{
+			CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
 		}, nil
 	}
 
 	splits := strings.Split(sourceResourceID, "/")
 	if len(splits) > 9 {
 		if sourceType == consts.SourceSnapshot {
-			return compute.CreationData{}, fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", sourceResourceID, diskSnapshotPathRE)
+			return armcompute.CreationData{}, fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", sourceResourceID, diskSnapshotPathRE)
 		}
 
-		return compute.CreationData{}, fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", sourceResourceID, consts.ManagedDiskPathRE)
+		return armcompute.CreationData{}, fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", sourceResourceID, consts.ManagedDiskPathRE)
 	}
-	return compute.CreationData{
-		CreateOption:     compute.Copy,
+	return armcompute.CreationData{
+		CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
 		SourceResourceID: &sourceResourceID,
 	}, nil
 }
@@ -533,33 +501,33 @@ func NormalizeCachingMode(cachingMode v1.AzureDataDiskCachingMode) (v1.AzureData
 	return cachingMode, nil
 }
 
-func NormalizeNetworkAccessPolicy(networkAccessPolicy string) (compute.NetworkAccessPolicy, error) {
+func NormalizeNetworkAccessPolicy(networkAccessPolicy string) (armcompute.NetworkAccessPolicy, error) {
 	if networkAccessPolicy == "" {
-		return compute.NetworkAccessPolicy(networkAccessPolicy), nil
+		return armcompute.NetworkAccessPolicy(networkAccessPolicy), nil
 	}
-	policy := compute.NetworkAccessPolicy(networkAccessPolicy)
-	for _, s := range compute.PossibleNetworkAccessPolicyValues() {
+	policy := armcompute.NetworkAccessPolicy(networkAccessPolicy)
+	for _, s := range armcompute.PossibleNetworkAccessPolicyValues() {
 		if policy == s {
 			return policy, nil
 		}
 	}
-	return "", fmt.Errorf("azureDisk - %s is not supported NetworkAccessPolicy. Supported values are %s", networkAccessPolicy, compute.PossibleNetworkAccessPolicyValues())
+	return "", fmt.Errorf("azureDisk - %s is not supported NetworkAccessPolicy. Supported values are %s", networkAccessPolicy, armcompute.PossibleNetworkAccessPolicyValues())
 }
 
-func NormalizePublicNetworkAccess(publicNetworkAccess string) (compute.PublicNetworkAccess, error) {
+func NormalizePublicNetworkAccess(publicNetworkAccess string) (armcompute.PublicNetworkAccess, error) {
 	if publicNetworkAccess == "" {
-		return compute.PublicNetworkAccess(publicNetworkAccess), nil
+		return armcompute.PublicNetworkAccess(publicNetworkAccess), nil
 	}
-	access := compute.PublicNetworkAccess(publicNetworkAccess)
-	for _, s := range compute.PossiblePublicNetworkAccessValues() {
+	access := armcompute.PublicNetworkAccess(publicNetworkAccess)
+	for _, s := range armcompute.PossiblePublicNetworkAccessValues() {
 		if access == s {
 			return access, nil
 		}
 	}
-	return "", fmt.Errorf("azureDisk - %s is not supported PublicNetworkAccess. Supported values are %s", publicNetworkAccess, compute.PossiblePublicNetworkAccessValues())
+	return "", fmt.Errorf("azureDisk - %s is not supported PublicNetworkAccess. Supported values are %s", publicNetworkAccess, armcompute.PossiblePublicNetworkAccessValues())
 }
 
-func NormalizeStorageAccountType(storageAccountType, cloud string, disableAzureStackCloud bool) (compute.DiskStorageAccountTypes, error) {
+func NormalizeStorageAccountType(storageAccountType, cloud string, disableAzureStackCloud bool) (armcompute.DiskStorageAccountTypes, error) {
 	if storageAccountType == "" {
 		if IsAzureStackCloud(cloud, disableAzureStackCloud) {
 			return azureStackCloudDefaultStorageAccountType, nil
@@ -567,10 +535,10 @@ func NormalizeStorageAccountType(storageAccountType, cloud string, disableAzureS
 		return azurePublicCloudDefaultStorageAccountType, nil
 	}
 
-	sku := compute.DiskStorageAccountTypes(storageAccountType)
-	supportedSkuNames := compute.PossibleDiskStorageAccountTypesValues()
+	sku := armcompute.DiskStorageAccountTypes(storageAccountType)
+	supportedSkuNames := armcompute.PossibleDiskStorageAccountTypesValues()
 	if IsAzureStackCloud(cloud, disableAzureStackCloud) {
-		supportedSkuNames = []compute.DiskStorageAccountTypes{compute.StandardLRS, compute.PremiumLRS}
+		supportedSkuNames = []armcompute.DiskStorageAccountTypes{armcompute.DiskStorageAccountTypesStandardLRS, armcompute.DiskStorageAccountTypesPremiumLRS}
 	}
 	for _, s := range supportedSkuNames {
 		if sku == s {
@@ -585,7 +553,7 @@ func ValidateDiskEncryptionType(encryptionType string) error {
 	if encryptionType == "" {
 		return nil
 	}
-	supportedTypes := compute.PossibleEncryptionTypeValues()
+	supportedTypes := armcompute.PossibleEncryptionTypeValues()
 	for _, s := range supportedTypes {
 		if encryptionType == string(s) {
 			return nil
@@ -598,7 +566,7 @@ func ValidateDataAccessAuthMode(dataAccessAuthMode string) error {
 	if dataAccessAuthMode == "" {
 		return nil
 	}
-	supportedModes := compute.PossibleDataAccessAuthModeValues()
+	supportedModes := armcompute.PossibleDataAccessAuthModeValues()
 	for _, s := range supportedModes {
 		if dataAccessAuthMode == string(s) {
 			return nil
@@ -634,8 +602,14 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 		case consts.ResourceGroupField:
 			diskParams.ResourceGroup = v
 		case consts.DiskIOPSReadWriteField:
+			if _, err = strconv.Atoi(v); err != nil {
+				return diskParams, fmt.Errorf("parse %s:%s failed with error: %v", consts.DiskIOPSReadWriteField, v, err)
+			}
 			diskParams.DiskIOPSReadWrite = v
 		case consts.DiskMBPSReadWriteField:
+			if _, err = strconv.Atoi(v); err != nil {
+				return diskParams, fmt.Errorf("parse %s:%s failed with error: %v", consts.DiskMBPSReadWriteField, v, err)
+			}
 			diskParams.DiskMBPSReadWrite = v
 		case consts.LogicalSectorSizeField:
 			diskParams.LogicalSectorSize, err = strconv.Atoi(v)
@@ -689,7 +663,7 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 		case consts.UserAgentField:
 			diskParams.UserAgent = v
 		case consts.EnableAsyncAttachField:
-			diskParams.VolumeContext[consts.EnableAsyncAttachField] = v
+			// no op, only for backward compatibility
 		case consts.ZonedField:
 			// no op, only for backward compatibility with in-tree driver
 		case consts.PerformancePlusField:
@@ -722,9 +696,9 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 		diskParams.Tags[k] = v
 	}
 
-	if strings.EqualFold(diskParams.AccountType, string(compute.PremiumV2LRS)) {
+	if strings.EqualFold(diskParams.AccountType, string(armcompute.DiskStorageAccountTypesPremiumV2LRS)) {
 		if diskParams.CachingMode != "" && !strings.EqualFold(string(diskParams.CachingMode), string(v1.AzureDataDiskCachingNone)) {
-			return diskParams, fmt.Errorf("cachingMode %s is not supported for %s", diskParams.CachingMode, compute.PremiumV2LRS)
+			return diskParams, fmt.Errorf("cachingMode %s is not supported for %s", diskParams.CachingMode, armcompute.DiskStorageAccountTypesPremiumV2LRS)
 		}
 	}
 
@@ -778,18 +752,18 @@ func checkDiskName(diskName string) bool {
 	return true
 }
 
-// InsertDiskProperties: insert disk properties to map
-func InsertDiskProperties(disk *compute.Disk, publishConext map[string]string) {
+// InsertProperties: insert disk properties to map
+func InsertDiskProperties(disk *armcompute.Disk, publishConext map[string]string) {
 	if disk == nil || publishConext == nil {
 		return
 	}
 
-	if disk.Sku != nil {
-		publishConext[consts.SkuNameField] = string(disk.Sku.Name)
+	if disk.SKU != nil {
+		publishConext[consts.SkuNameField] = string(*disk.SKU.Name)
 	}
-	prop := disk.DiskProperties
+	prop := disk.Properties
 	if prop != nil {
-		publishConext[consts.NetworkAccessPolicyField] = string(prop.NetworkAccessPolicy)
+		publishConext[consts.NetworkAccessPolicyField] = string(*prop.NetworkAccessPolicy)
 		if prop.DiskIOPSReadWrite != nil {
 			publishConext[consts.DiskIOPSReadWriteField] = strconv.Itoa(int(*prop.DiskIOPSReadWrite))
 		}
@@ -810,7 +784,7 @@ func InsertDiskProperties(disk *compute.Disk, publishConext map[string]string) {
 }
 
 func SleepIfThrottled(err error, defaultSleepSec int) {
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(consts.TooManyRequests)) || strings.Contains(strings.ToLower(err.Error()), consts.ClientThrottled) {
+	if err != nil && IsThrottlingError(err) {
 		retryAfter := getRetryAfterSeconds(err)
 		if retryAfter == 0 {
 			retryAfter = defaultSleepSec
@@ -818,6 +792,14 @@ func SleepIfThrottled(err error, defaultSleepSec int) {
 		klog.Warningf("sleep %d more seconds, waiting for throttling complete", retryAfter)
 		time.Sleep(time.Duration(retryAfter) * time.Second)
 	}
+}
+
+func IsThrottlingError(err error) bool {
+	if err != nil {
+		errMsg := strings.ToLower(err.Error())
+		return strings.Contains(errMsg, strings.ToLower(consts.TooManyRequests)) || strings.Contains(errMsg, consts.ClientThrottled)
+	}
+	return false
 }
 
 // getRetryAfterSeconds returns the number of seconds to wait from the error message
@@ -862,4 +844,19 @@ func RunPowershellCmd(command string, envs ...string) ([]byte, error) {
 	cmd.Env = append(os.Environ(), envs...)
 	klog.V(6).Infof("Executing command: %q", cmd.String())
 	return cmd.CombinedOutput()
+}
+
+// GenerateVolumeName returns a PV name with clusterName prefix. The function
+// should be used to generate a name of GCE PD or Cinder volume. It basically
+// adds "<clusterName>-dynamic-" before the PV name, making sure the resulting
+// string fits given length and cuts "dynamic" if not.
+func GenerateVolumeName(clusterName, pvName string, maxLength int) string {
+	prefix := clusterName + "-dynamic"
+	pvLen := len(pvName)
+	// cut the "<clusterName>-dynamic" to fit full pvName into maxLength
+	// +1 for the '-' dash
+	if pvLen+1+len(prefix) > maxLength {
+		prefix = prefix[:maxLength-pvLen-1]
+	}
+	return prefix + "-" + pvName
 }

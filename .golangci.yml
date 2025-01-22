@@ -1,12 +1,3 @@
-run:
-  deadline: 10m
-
-linters:
-  disable:
-  - typecheck
-  enable:
-  - revive
-
 linters-settings:
   depguard:
     rules:

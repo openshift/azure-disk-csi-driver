@@ -7,21 +7,12 @@
     - [add the Helm chart repository](#add-the-helm-chart-repository)
     - [search for all available chart versions](#search-for-all-available-chart-versions)
     - [update the repository](#update-the-repository)
-  - [Azure Disk CSI Driver V1](#azure-disk-csi-driver-v1)
     - [install a specific version](#install-a-specific-version)
     - [install on Azure Stack](#install-on-azure-stack)
     - [install on RedHat/CentOS](#install-on-redhatcentos)
     - [install driver with customized driver name, deployment name](#install-driver-with-customized-driver-name-deployment-name)
     - [uninstall CSI driver](#uninstall-csi-driver)
     - [latest chart configuration](#latest-chart-configuration)
-      - [V1 Parameters](#v1-parameters)
-  - [Azure Disk CSI Driver V2 (Preview)](#azure-disk-csi-driver-v2-preview)
-    - [install Azure Disk CSI Driver V2 (Preview)](#install-azure-disk-csi-driver-v2-preview)
-    - [install Azure Disk CSI Driver V2 side-by-side with Azure Disk CSI Driver V1 (Preview)](#install-azure-disk-csi-driver-v2-side-by-side-with-azure-disk-csi-driver-v1-preview)
-    - [install driver with Prometheus monitors](#install-driver-with-prometheus-monitors)
-    - [upgrade Azure Disk CSI Driver V1 to V2 (Preview)](#upgrade-azure-disk-csi-driver-v1-to-v2-preview)
-    - [Preview chart configuration](#preview-chart-configuration)
-      - [New or Updated Parameters for V2](#new-or-updated-parameters-for-v2)
   - [Troubleshooting](#troubleshooting)
 
 ---
@@ -66,12 +57,10 @@ helm repo update azuredisk-csi-driver
 
 ---
 
-## Azure Disk CSI Driver V1
-
 ### install a specific version
 
 ```console
-helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version v1.29.11
+helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version v1.31.1
 ```
 
 ### install on Azure Stack
@@ -113,8 +102,6 @@ helm uninstall azuredisk-csi-driver -n kube-system
 
 ### latest chart configuration
 
-#### V1 Parameters
-
 The following table lists the configurable parameters of the latest Azure Disk CSI Driver chart and default values.
 
 | Parameter                                         | Description                                                | Default                                                      |
@@ -127,23 +114,23 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `driver.azureGoSDKLogLevel`                       | [Azure go sdk log level](https://github.com/Azure/azure-sdk-for-go/blob/main/documentation/previous-versions-quickstart.md#built-in-basic-requestresponse-logging)  | ``(no logs), `DEBUG`, `INFO`, `WARNING`, `ERROR`, [etc](https://github.com/Azure/go-autorest/blob/50e09bb39af124f28f29ba60efde3fa74a4fe93f/logger/logger.go#L65-L73) |
 | `feature.enableFSGroupPolicy`                     | enable `fsGroupPolicy` on a k8s 1.20+ cluster              | `true`                      |
 | `image.baseRepo`                                  | base repository of driver images                           | `mcr.microsoft.com`                      |
-| `image.azuredisk.repository`                      | azuredisk-csi-driver docker image                          | `/oss/kubernetes-csi/azuredisk-csi`                      |
-| `image.azuredisk.tag`                             | azuredisk-csi-driver docker image tag                      | ``                                                       |
+| `image.azuredisk.repository`                      | azuredisk-csi-driver container image                          | `/oss/kubernetes-csi/azuredisk-csi`                      |
+| `image.azuredisk.tag`                             | azuredisk-csi-driver container image tag                      | ``                                                       |
 | `image.azuredisk.pullPolicy`                      | azuredisk-csi-driver image pull policy                     | `IfNotPresent`                                                 |
-| `image.csiProvisioner.repository`                 | csi-provisioner docker image                               | `/oss/kubernetes-csi/csi-provisioner`         |
-| `image.csiProvisioner.tag`                        | csi-provisioner docker image tag                           | `v3.5.0`                                                       |
+| `image.csiProvisioner.repository`                 | csi-provisioner container image                               | `/oss/kubernetes-csi/csi-provisioner`         |
+| `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v5.1.0`                                                       |
 | `image.csiProvisioner.pullPolicy`                 | csi-provisioner image pull policy                          | `IfNotPresent`                                                 |
-| `image.csiAttacher.repository`                    | csi-attacher docker image                                  | `/oss/kubernetes-csi/csi-attacher`            |
-| `image.csiAttacher.tag`                           | csi-attacher docker image tag                              | `v4.3.0`                                                       |
+| `image.csiAttacher.repository`                    | csi-attacher container image                                  | `/oss/kubernetes-csi/csi-attacher`            |
+| `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.7.0`                                                       |
 | `image.csiAttacher.pullPolicy`                    | csi-attacher image pull policy                             | `IfNotPresent`                                                 |
-| `image.csiResizer.repository`                     | csi-resizer docker image                                   | `/oss/kubernetes-csi/csi-resizer`             |
-| `image.csiResizer.tag`                            | csi-resizer docker image tag                               | `v1.8.0`                                                       |
+| `image.csiResizer.repository`                     | csi-resizer container image                                   | `/oss/kubernetes-csi/csi-resizer`             |
+| `image.csiResizer.tag`                            | csi-resizer container image tag                               | `v1.12.0`                                                       |
 | `image.csiResizer.pullPolicy`                     | csi-resizer image pull policy                              | `IfNotPresent`                                                 |
-| `image.livenessProbe.repository`                  | liveness-probe docker image                                | `/oss/kubernetes-csi/livenessprobe`           |
-| `image.livenessProbe.tag`                         | liveness-probe docker image tag                            | `v2.10.0`                                                       |
+| `image.livenessProbe.repository`                  | liveness-probe container image                                | `/oss/kubernetes-csi/livenessprobe`           |
+| `image.livenessProbe.tag`                         | liveness-probe container image tag                            | `v2.14.0`                                                       |
 | `image.livenessProbe.pullPolicy`                  | liveness-probe image pull policy                           | `IfNotPresent`                                                 |
-| `image.nodeDriverRegistrar.repository`            | csi-node-driver-registrar docker image                     | `/oss/kubernetes-csi/csi-node-driver-registrar` |
-| `image.nodeDriverRegistrar.tag`                   | csi-node-driver-registrar docker image tag                 | `v2.8.0`                                                       |
+| `image.nodeDriverRegistrar.repository`            | csi-node-driver-registrar container image                     | `/oss/kubernetes-csi/csi-node-driver-registrar` |
+| `image.nodeDriverRegistrar.tag`                   | csi-node-driver-registrar container image tag                 | `v2.12.0`                                                       |
 | `image.nodeDriverRegistrar.pullPolicy`            | csi-node-driver-registrar image pull policy                | `IfNotPresent`                                                 |
 | `imagePullSecrets`                                | Specify docker-registry secret names as an array           | [] (does not add image pull secrets to deployed pods)        |                                       |
 | `serviceAccount.create`                           | whether create service account of csi-azuredisk-controller, csi-azuredisk-node, and snapshot-controller| `true`                                                    |
@@ -205,11 +192,11 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `node.livenessProbe.healthPort`                   | health check port for liveness probe                       | `29603` |
 | `node.logLevel`                                   | node driver log level                                      |`5`                                                           |
 | `snapshot.enabled`                                | whether enable snapshot feature                            | `false`                                                        |
-| `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter docker image                               | `/oss/kubernetes-csi/csi-snapshotter`         |
-| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter docker image tag                           | `v6.3.1`                                                       |
+| `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter container image                               | `/oss/kubernetes-csi/csi-snapshotter`         |
+| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter container image tag                           | `v8.1.0`                                                       |
 | `snapshot.image.csiSnapshotter.pullPolicy`        | csi-snapshotter image pull policy                          | `IfNotPresent`                                                 |
-| `snapshot.image.csiSnapshotController.repository` | snapshot-controller docker image                           | `/oss/kubernetes-csi/snapshot-controller`     |
-| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller docker image tag                       | `v6.3.1`                                                      |
+| `snapshot.image.csiSnapshotController.repository` | snapshot-controller container image                           | `/oss/kubernetes-csi/snapshot-controller`     |
+| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller container image tag                       | `v8.1.0`                                                      |
 | `snapshot.image.csiSnapshotController.pullPolicy` | snapshot-controller image pull policy                      | `IfNotPresent`                                                 |
 | `snapshot.snapshotController.name`                | snapshot controller name                                   | `csi-snapshot-controller`                                                           |
 | `snapshot.snapshotController.replicas`            | the replicas of snapshot-controller                        | `2`                                                            |
@@ -270,107 +257,11 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `windows.resources.azuredisk.limits.memory`              | azuredisk memory limits                         | 600Mi                                                         |
 | `windows.resources.azuredisk.requests.cpu`               | azuredisk cpu requests                   | 10m                                                            |
 | `windows.resources.azuredisk.requests.memory`            | azuredisk memory requests                | 40Mi                                                           |
-| `windows.useHostProcessContainers`                       | use HostProcessContainers for deployment | false                                                          |
+| `windows.useHostProcessContainers`                       | whether deploy driver daemonset with HostProcess containers on windows | true                                                          |
 | `cloud`                                           | cloud environment driver is running on                     | `AzurePublicCloud`                                                  |
-
----
-
-## Azure Disk CSI Driver V2 (Preview)
-
-### install Azure Disk CSI Driver V2 (Preview)
-
-Applicable to any Kubernetes cluster without the Azure Disk CSI Driver V1 installed. If V1 is installed, proceed to side-by-side installation instructions below. The V1 driver is installed by default in AKS clusters with Kubernetes version 1.21 and later.
-
-```console
-helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version v2.0.0-beta.6
-```
-
-### install Azure Disk CSI Driver V2 side-by-side with Azure Disk CSI Driver V1 (Preview)
-
-Since VolumeSnapshot CRDs and other components are created first when V1 driver is installed, use the side-by-side-values.yaml to customize the V2 driver to run side-by-side with the V1 driver. Note that if you uninstall the V1 driver, you would have to update your V2 driver to install the necessary snapshot components that would have then been deleted.
-
-```console
-helm install azuredisk-csi-driver-v2 azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system \
-  --version v2.0.0-beta.6 \
-  --values https://raw.githubusercontent.com/kubernetes-sigs/azuredisk-csi-driver/master/charts/v2.0.0-beta.6/azuredisk-csi-driver/side-by-side-values.yaml
-```
-
-> NOTE: When installing the V2 driver side-by-side with the V1 driver in an AKS cluster, you will need to grant the agentpool service principal or managed identity `Contributor` access to the resource groups used to store managed disks. By default, this is the resource group prefixed by `MC_` corresponding to your AKS cluster.
-
-### install driver with Prometheus monitors
-
-```console
->/tmp/azuredisk-csi-driver-overrides.yaml cat <<EOF
-controller:
-  metrics:
-    service:
-      enabled: true
-      monitor:
-        enabled: true
-schedulerExtender:
-  metrics:
-    service:
-      enabled: true
-      monitor:
-        enabled: true
-EOF
-helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version v2.0.0-beta.6 --values /tmp/azuredisk-csi-driver-overrides.yaml
-```
-
-### upgrade Azure Disk CSI Driver V1 to V2 (Preview)
-
-This assumes you have already installed Azure Disk CSI Driver V1 to a non-AKS cluster, e.g. one created using [aks-engine](https://github.com/Azure/aks-engine) or [Cluster API Provider for Azure (CAPZ)](https://github.com/kubernetes-sigs/cluster-api-provider-azure).
-
-```console
-helm upgrade azure-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version v2.0.0-beta.6
-```
-
----
-
-### Preview chart configuration
-
-#### New or Updated Parameters for V2
-
-In addition to the parameters supported by the V1 driver, Azure Disk CSI driver V2 adds or modifies the following parameters:
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `image.azuredisk.tag` | Azure Disk CSI Driver V2 docker image tag | `v2.0.0-beta.6` |
-| `image.curl.repository` | curl docker image | `docker.io/curlimages/curl` |
-| `image.curl.tag` | curl docker image tag | `latest` |
-| `image.curl.pullPolicy` | curl docker image pull policy | `IfNotPresent` |
-| `image.schedulerExtender.repository` | Azure Disk CSI Driver V2 Scheduler Extender docker image | `/oss/csi/azdiskschedulerextender-csi` |
-| `image.schedulerExtender.tag` | Azure Disk CSI Driver V2 Scheduler Extender docker image tag | `v2.0.0-beta.6` |
-| `image.schedulerExtender.pullPolicy` | Azure Disk CSI Driver V2 Scheduler Extender docker image pull policy | `IfNotPresent` |
-| `image.kubeScheduler.repository` | kube-scheduler docker image | `/oss/kubernetes/kube-scheduler` |
-| `image.kubeScheduler.tag` | kube-scheduler docker image tag - this version should be the same as the Kubernetes cluster version | `v1.21.2` |
-| `image.kubeScheduler.pullPolicy` | kube-scheduler docker image pull policy | `IfNotPresent` |
-| `serviceAccount.schedulerExtender`| name of service account for Azure Disk CSI Driver V2 Scheduler Extender | `csi-azuredisk-scheduler-extender-sa` |
-| `controller.metrics.port` | Azure Disk CSI Driver V2 controller metrics server port. This value replaces `controller.metricsPort` | `29604` |
-| `controller.metrics.service.enabled` | whether a `Service` is created for the Azure Disk CSI Driver V2 controller metrics server | `false` |
-| `controller.metrics.service.monitor.enabled` | whether a `ServiceMonitor` is created for the Azure Disk CSI Driver V2 controller metrics server `Service`. | `false` |
-| `schedulerExtender.name` | Azure Disk CSI Driver V2 Scheduler Extender deployment name | `csi-azuredisk-scheduler-extender` |
-| `schedulerExtender.replicas` | Azure Disk CSI Driver V2 Scheduler Extender replica count | `2` |
-| `schedulerExtender.metrics.port` | Azure Disk CSI Driver V2 Scheduler Extender metrics server port | `29604` |
-| `schedulerExtender.metrics.service.enabled` | whether a `Service` is created for the Azure Disk CSI Driver V2 Scheduler Extender metrics server | `false` |
-| `schedulerExtender.metrics.service.monitor.enabled` | whether a `ServiceMonitor` is created for the Azure Disk CSI Driver V2 Scheduler Extender metrics server `Service`. | `false` |
-| `schedulerExtender.servicePort` | Azure Disk CSI Driver V2 Scheduler Extender service port | `8889` |
-| `schedulerExtender.labels`                                  | Azure Disk CSI Driver V2 Scheduler Extender deployment extra labels                     | `{}`
-| `schedulerExtender.annotations`                             | Azure Disk CSI Driver V2 Scheduler Extender deployment extra annotations                | `{}`
-| `schedulerExtender.podLabels`                               | Azure Disk CSI Driver V2 Scheduler Extender pods extra labels                          | `{}`
-| `schedulerExtender.podAnnotations`                          | Azure Disk CSI Driver V2 Scheduler Extender pods extra annotations                     | `{}`
-| `snapshot.createCRDs` | whether the snapshot CRDs are created | `true` |
-| `storageClasses.create` | whether to create the default `StorageClass` instances for Azure Disk CSI Driver V2 | `true` |
-| `storageClasses.enableZRS` | whether to create the `StorageClass` instances for ZRS disks (not supported in all regions) | `false` |
-| `storageClasses.enableUltraSSD` | whether to create the `StorageClass` instances for UltraSSD disks (not supported in all regions) | `false` |
-| `storageClasses.storageClassNames.standardLRS` | The `StorageClass` name for `Standard_LRS` disks | `azuredisk-standard-hdd-lrs` |
-| `storageClasses.storageClassNames.standardSSDLRS` | The `StorageClass` name for `StandardSSD_LRS` disks | `azuredisk-standard-sdd-lrs` |
-| `storageClasses.storageClassNames.standardSSDZRS` | The `StorageClass` name for `StandardSSD_ZRS` disks | `azuredisk-standard-sdd-zrs` |
-| `storageClasses.storageClassNames.premiumLRS` | The `StorageClass` name for `Premium_LRS` disks | `azuredisk-premium-sdd-lrs` |
-| `storageClasses.storageClassNames.premiumZRS` | The `StorageClass` name for `Premium_ZRS` disks | `azuredisk-premium-sdd-zrs` |
-| `storageClasses.storageClassNames.ultraSSDLRS` | The `StorageClass` name for `UltraSSD_LRS` disks | `azuredisk-ultra-sdd-lrs` |
 | `workloadIdentity.clientID` | client ID of workload identity | ''
 | `workloadIdentity.tenantID` | [optional] If the AAD application or user-assigned managed identity is not in the same tenant as the cluster then set tenantID with the AAD application or user-assigned managed identity tenant ID | ''
+---
 
 ## Troubleshooting
 

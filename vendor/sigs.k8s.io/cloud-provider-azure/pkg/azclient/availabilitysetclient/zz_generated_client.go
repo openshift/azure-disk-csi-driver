@@ -22,30 +22,48 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
+	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/metrics"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
+const AzureStackCloudAPIVersion = "2019-07-01"
+
 type Client struct {
 	*armcompute.AvailabilitySetsClient
+	subscriptionID string
+	tracer         tracing.Tracer
 }
 
 func New(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Interface, error) {
 	if options == nil {
 		options = utils.GetDefaultOption()
 	}
+	tr := options.TracingProvider.NewTracer(utils.ModuleName, utils.ModuleVersion)
 
 	client, err := armcompute.NewAvailabilitySetsClient(subscriptionID, credential, options)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{client}, nil
+	return &Client{
+		AvailabilitySetsClient: client,
+		subscriptionID:         subscriptionID,
+		tracer:                 tr,
+	}, nil
 }
 
-// Get gets the AvailabilitySet
-func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.AvailabilitySet, rerr error) {
+const GetOperationName = "AvailabilitySetsClient.Get"
 
+// Get gets the AvailabilitySet
+func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.AvailabilitySet, err error) {
+
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "AvailabilitySet", "get")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, GetOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := client.AvailabilitySetsClient.Get(ctx, resourceGroupName, resourceName, nil)
 	if err != nil {
 		return nil, err
@@ -54,8 +72,14 @@ func (client *Client) Get(ctx context.Context, resourceGroupName string, resourc
 	return &resp.AvailabilitySet, nil
 }
 
+const ListOperationName = "AvailabilitySetsClient.List"
+
 // List gets a list of AvailabilitySet in the resource group.
-func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.AvailabilitySet, rerr error) {
+func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.AvailabilitySet, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "AvailabilitySet", "list")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, ListOperationName, client.tracer, nil)
+	defer endSpan(err)
 	pager := client.AvailabilitySetsClient.NewListPager(resourceGroupName, nil)
 	for pager.More() {
 		nextResult, err := pager.NextPage(ctx)

@@ -21,7 +21,7 @@ import (
 	"html/template"
 	"os"
 
-	"github.com/pborman/uuid"
+	"k8s.io/apimachinery/pkg/util/uuid"
 )
 
 const (
@@ -104,7 +104,7 @@ func CreateAzureCredentialFile() (*Credentials, error) {
 	aadFederatedTokenFile = os.Getenv(federatedTokenFileVar)
 
 	if resourceGroup == "" {
-		resourceGroup = ResourceGroupPrefix + uuid.NewUUID().String()
+		resourceGroup = ResourceGroupPrefix + string(uuid.NewUUID())
 	}
 
 	if location == "" {

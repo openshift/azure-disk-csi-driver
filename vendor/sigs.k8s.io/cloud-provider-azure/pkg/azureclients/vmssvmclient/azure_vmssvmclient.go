@@ -29,7 +29,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	azclients "sigs.k8s.io/cloud-provider-azure/pkg/azureclients"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/armclient"
@@ -217,7 +217,7 @@ func (c *Client) listVMSSVM(ctx context.Context, resourceGroupName string, virtu
 		result = append(result, page.Values()...)
 
 		// Abort the loop when there's no nextLink in the response.
-		if pointer.StringDeref(page.Response().NextLink, "") == "" {
+		if ptr.Deref(page.Response().NextLink, "") == "" {
 			break
 		}
 
@@ -383,12 +383,12 @@ func (c *Client) listResponder(resp *http.Response) (result compute.VirtualMachi
 // virtualMachineScaleSetListResultPreparer prepares a request to retrieve the next set of results.
 // It returns nil if no more results exist.
 func (c *Client) virtualMachineScaleSetVMListResultPreparer(ctx context.Context, vmssvmlr compute.VirtualMachineScaleSetVMListResult) (*http.Request, error) {
-	if vmssvmlr.NextLink == nil || len(pointer.StringDeref(vmssvmlr.NextLink, "")) < 1 {
+	if vmssvmlr.NextLink == nil || len(ptr.Deref(vmssvmlr.NextLink, "")) < 1 {
 		return nil, nil
 	}
 
 	decorators := []autorest.PrepareDecorator{
-		autorest.WithBaseURL(pointer.StringDeref(vmssvmlr.NextLink, "")),
+		autorest.WithBaseURL(ptr.Deref(vmssvmlr.NextLink, "")),
 	}
 	return c.armClient.PrepareGetRequest(ctx, decorators...)
 }
@@ -509,42 +509,15 @@ func (c *Client) updateVMSSVMs(ctx context.Context, resourceGroupName string, VM
 	}
 
 	responses := c.armClient.PutResourcesInBatches(ctx, resources, batchSize)
-	errors := make([]*retry.Error, 0)
-	for resourceID, resp := range responses {
-		if resp == nil {
-			continue
+	errors, retryIDs := c.parseResp(ctx, responses, true)
+	if len(retryIDs) > 0 {
+		retryResources := make(map[string]interface{})
+		for _, id := range retryIDs {
+			retryResources[id] = resources[id]
 		}
-
-		defer c.armClient.CloseResponse(ctx, resp.Response)
-		if resp.Error != nil {
-			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.request", resourceID, resp.Error.Error())
-
-			errMsg := resp.Error.Error().Error()
-			if strings.Contains(errMsg, consts.VmssVMNotActiveErrorMessage) {
-				klog.V(2).Infof("VMSS VM %s is not active, skip updating it.", resourceID)
-				continue
-			}
-			if strings.Contains(errMsg, consts.ParentResourceNotFoundMessageCode) {
-				klog.V(2).Info("The parent resource of VMSS VM %s is not found, skip updating it.", resourceID)
-				continue
-			}
-			if strings.Contains(errMsg, consts.CannotUpdateVMBeingDeletedMessagePrefix) &&
-				strings.Contains(errMsg, consts.CannotUpdateVMBeingDeletedMessageSuffix) {
-				klog.V(2).Infof("The VM %s is being deleted, skip updating it.", resourceID)
-				continue
-			}
-
-			errors = append(errors, resp.Error)
-			continue
-		}
-
-		if resp.Response != nil && resp.Response.StatusCode != http.StatusNoContent {
-			_, rerr := c.updateResponder(resp.Response)
-			if rerr != nil {
-				klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.respond", resourceID, rerr.Error())
-				errors = append(errors, rerr)
-			}
-		}
+		resps := c.armClient.PutResourcesInBatches(ctx, retryResources, batchSize)
+		errs, _ := c.parseResp(ctx, resps, false)
+		errors = append(errors, errs...)
 	}
 
 	// Aggregate errors.
@@ -567,4 +540,65 @@ func (c *Client) updateVMSSVMs(ctx context.Context, resourceGroupName string, VM
 	}
 
 	return nil
+}
+
+func (c *Client) parseResp(
+	ctx context.Context,
+	responses map[string]*armclient.PutResourcesResponse,
+	shouldRetry bool,
+) ([]*retry.Error, []string) {
+	var (
+		errors   []*retry.Error
+		retryIDs []string
+	)
+	for resourceID, resp := range responses {
+		if resp == nil {
+			continue
+		}
+
+		defer c.armClient.CloseResponse(ctx, resp.Response)
+		if resp.Error != nil {
+			klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.request", resourceID, resp.Error.Error())
+
+			errMsg := resp.Error.Error().Error()
+			if strings.Contains(errMsg, consts.VmssVMNotActiveErrorMessage) {
+				klog.V(2).Infof("VMSS VM %s is not active, skip updating it.", resourceID)
+				continue
+			}
+			if strings.Contains(errMsg, consts.ParentResourceNotFoundMessageCode) {
+				klog.V(2).Infof("The parent resource of VMSS VM %s is not found, skip updating it.", resourceID)
+				continue
+			}
+			if strings.Contains(errMsg, consts.CannotUpdateVMBeingDeletedMessagePrefix) &&
+				strings.Contains(errMsg, consts.CannotUpdateVMBeingDeletedMessageSuffix) {
+				klog.V(2).Infof("The VM %s is being deleted, skip updating it.", resourceID)
+				continue
+			}
+
+			if retry.IsSuccessHTTPResponse(resp.Response) &&
+				strings.Contains(
+					strings.ToLower(errMsg),
+					strings.ToLower(consts.OperationPreemptedErrorMessage),
+				) {
+				if shouldRetry {
+					klog.V(2).Infof("The operation on VM %s is preempted, will retry.", resourceID)
+					retryIDs = append(retryIDs, resourceID)
+					continue
+				}
+				klog.V(2).Infof("The operation on VM %s is preempted, will not retry.", resourceID)
+			}
+
+			errors = append(errors, resp.Error)
+			continue
+		}
+
+		if resp.Response != nil && resp.Response.StatusCode != http.StatusNoContent {
+			_, rerr := c.updateResponder(resp.Response)
+			if rerr != nil {
+				klog.V(5).Infof("Received error in %s: resourceID: %s, error: %s", "vmssvm.put.respond", resourceID, rerr.Error())
+				errors = append(errors, rerr)
+			}
+		}
+	}
+	return errors, retryIDs
 }

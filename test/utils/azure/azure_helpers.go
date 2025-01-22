@@ -22,11 +22,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
-	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 	resources "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/diskclient"
@@ -50,35 +49,23 @@ type Client struct {
 
 func GetAzureClient(cloud, subscriptionID, clientID, tenantID, clientSecret, aadFederatedTokenFile string) (*Client, error) {
 	armConfig := &azclient.ARMClientConfig{
-		Cloud: cloud,
+		Cloud:    cloud,
+		TenantID: tenantID,
 	}
 	useFederatedWorkloadIdentityExtension := false
 	if aadFederatedTokenFile != "" {
 		useFederatedWorkloadIdentityExtension = true
 	}
-	cloudConfig, err := azclient.GetAzureCloudConfig(armConfig)
-	if err != nil {
-		return nil, err
-	}
-	credProvider, err := azclient.NewAuthProvider(azclient.AzureAuthConfig{
-		TenantID:                              tenantID,
+	credProvider, err := azclient.NewAuthProvider(armConfig, &azclient.AzureAuthConfig{
 		AADClientID:                           clientID,
 		AADClientSecret:                       clientSecret,
 		AADFederatedTokenFile:                 aadFederatedTokenFile,
 		UseFederatedWorkloadIdentityExtension: useFederatedWorkloadIdentityExtension,
-	}, &arm.ClientOptions{
-		AuxiliaryTenants: []string{tenantID},
-		ClientOptions: policy.ClientOptions{
-			Cloud: *cloudConfig,
-		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	cred, err := credProvider.GetAzIdentity()
-	if err != nil {
-		return nil, err
-	}
+	cred := credProvider.GetAzIdentity()
 	factory, err := azclient.NewClientFactory(&azclient.ClientFactoryConfig{
 		SubscriptionID: subscriptionID,
 	}, armConfig, cred)
@@ -100,7 +87,7 @@ func (az *Client) GetAzureDisksClient() (diskclient.Interface, error) {
 }
 
 func (az *Client) EnsureSSHPublicKey(ctx context.Context, resourceGroupName, location, keyName string) (publicKey string, err error) {
-	_, err = az.sshPublicKeysClient.Create(ctx, resourceGroupName, keyName, compute.SSHPublicKeyResource{Location: &location})
+	_, err = az.sshPublicKeysClient.Create(ctx, resourceGroupName, keyName, armcompute.SSHPublicKeyResource{Location: &location})
 	if err != nil {
 		return "", err
 	}
@@ -154,12 +141,12 @@ func (az *Client) DeleteResourceGroup(ctx context.Context, groupName string) err
 func (az *Client) EnsureVirtualMachine(ctx context.Context, groupName, location, vmName string) (compute.VirtualMachine, error) {
 	nic, err := az.EnsureNIC(ctx, groupName, location, vmName+"-nic", vmName+"-vnet", vmName+"-subnet")
 	if err != nil {
-		return compute.VirtualMachine{}, err
+		return armcompute.VirtualMachine{}, err
 	}
 
 	publicKey, err := az.EnsureSSHPublicKey(ctx, groupName, location, "test-key")
 	if err != nil {
-		return compute.VirtualMachine{}, err
+		return armcompute.VirtualMachine{}, err
 	}
 
 	resp, err := az.vmClient.CreateOrUpdate(
@@ -168,25 +155,25 @@ func (az *Client) EnsureVirtualMachine(ctx context.Context, groupName, location,
 		vmName,
 		compute.VirtualMachine{
 			Location: to.Ptr(location),
-			Properties: &compute.VirtualMachineProperties{
-				HardwareProfile: &compute.HardwareProfile{
+			Properties: &armcompute.VirtualMachineProperties{
+				HardwareProfile: &armcompute.HardwareProfile{
 					VMSize: to.Ptr(compute.VirtualMachineSizeTypesStandardDS2V2),
 				},
-				StorageProfile: &compute.StorageProfile{
-					ImageReference: &compute.ImageReference{
+				StorageProfile: &armcompute.StorageProfile{
+					ImageReference: &armcompute.ImageReference{
 						Publisher: to.Ptr("Canonical"),
 						Offer:     to.Ptr("UbuntuServer"),
 						SKU:       to.Ptr("16.04.0-LTS"),
 						Version:   to.Ptr("latest"),
 					},
 				},
-				OSProfile: &compute.OSProfile{
+				OSProfile: &armcompute.OSProfile{
 					ComputerName:  to.Ptr(vmName),
 					AdminUsername: to.Ptr("azureuser"),
 					AdminPassword: to.Ptr("Azureuser1234"),
-					LinuxConfiguration: &compute.LinuxConfiguration{
+					LinuxConfiguration: &armcompute.LinuxConfiguration{
 						DisablePasswordAuthentication: to.Ptr(true),
-						SSH: &compute.SSHConfiguration{
+						SSH: &armcompute.SSHConfiguration{
 							PublicKeys: []*compute.SSHPublicKey{
 								{
 									Path:    to.Ptr("/home/azureuser/.ssh/authorized_keys"),
@@ -196,11 +183,11 @@ func (az *Client) EnsureVirtualMachine(ctx context.Context, groupName, location,
 						},
 					},
 				},
-				NetworkProfile: &compute.NetworkProfile{
+				NetworkProfile: &armcompute.NetworkProfile{
 					NetworkInterfaces: []*compute.NetworkInterfaceReference{
 						{
 							ID: nic.ID,
-							Properties: &compute.NetworkInterfaceReferenceProperties{
+							Properties: &armcompute.NetworkInterfaceReferenceProperties{
 								Primary: to.Ptr(true),
 							},
 						},
@@ -210,7 +197,7 @@ func (az *Client) EnsureVirtualMachine(ctx context.Context, groupName, location,
 		},
 	)
 	if err != nil {
-		return compute.VirtualMachine{}, fmt.Errorf("cannot create vm: %v", err)
+		return armcompute.VirtualMachine{}, fmt.Errorf("cannot create vm: %v", err)
 	}
 
 	return *resp, nil

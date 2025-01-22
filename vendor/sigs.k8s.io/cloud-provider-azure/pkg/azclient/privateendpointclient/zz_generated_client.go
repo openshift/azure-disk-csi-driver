@@ -22,33 +22,49 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	armnetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
+	armnetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/metrics"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
 type Client struct {
 	*armnetwork.PrivateEndpointsClient
+	subscriptionID string
+	tracer         tracing.Tracer
 }
 
 func New(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Interface, error) {
 	if options == nil {
 		options = utils.GetDefaultOption()
 	}
+	tr := options.TracingProvider.NewTracer(utils.ModuleName, utils.ModuleVersion)
 
 	client, err := armnetwork.NewPrivateEndpointsClient(subscriptionID, credential, options)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{client}, nil
+	return &Client{
+		PrivateEndpointsClient: client,
+		subscriptionID:         subscriptionID,
+		tracer:                 tr,
+	}, nil
 }
 
+const GetOperationName = "PrivateEndpointsClient.Get"
+
 // Get gets the PrivateEndpoint
-func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string, expand *string) (result *armnetwork.PrivateEndpoint, rerr error) {
+func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string, expand *string) (result *armnetwork.PrivateEndpoint, err error) {
 	var ops *armnetwork.PrivateEndpointsClientGetOptions
 	if expand != nil {
 		ops = &armnetwork.PrivateEndpointsClientGetOptions{Expand: expand}
 	}
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "PrivateEndpoint", "get")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, GetOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := client.PrivateEndpointsClient.Get(ctx, resourceGroupName, resourceName, ops)
 	if err != nil {
 		return nil, err
@@ -57,8 +73,14 @@ func (client *Client) Get(ctx context.Context, resourceGroupName string, resourc
 	return &resp.PrivateEndpoint, nil
 }
 
+const CreateOrUpdateOperationName = "PrivateEndpointsClient.Create"
+
 // CreateOrUpdate creates or updates a PrivateEndpoint.
-func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armnetwork.PrivateEndpoint) (*armnetwork.PrivateEndpoint, error) {
+func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armnetwork.PrivateEndpoint) (result *armnetwork.PrivateEndpoint, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "PrivateEndpoint", "create_or_update")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, CreateOrUpdateOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := utils.NewPollerWrapper(client.PrivateEndpointsClient.BeginCreateOrUpdate(ctx, resourceGroupName, resourceName, resource, nil)).WaitforPollerResp(ctx)
 	if err != nil {
 		return nil, err

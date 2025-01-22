@@ -113,14 +113,20 @@ const (
 	// StrRawVersion is the raw version string
 	StrRawVersion string = "raw"
 
-	// VirtualMachineScaleSetsDeallocating indicates VMSS instances are in Deallocating state.
-	VirtualMachineScaleSetsDeallocating = "Deallocating"
+	// ProvisionStateDeleting indicates VMSS instances are in Deleting state.
+	ProvisionStateDeleting = "Deleting"
 	// VmssMachineIDTemplate is the vmss manchine ID template
 	VmssMachineIDTemplate = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachineScaleSets/%s/virtualMachines/%s"
 	// VMSetCIDRIPV4TagKey specifies the node ipv4 CIDR mask of the instances on the VMSS or VMAS
 	VMSetCIDRIPV4TagKey = "kubernetesNodeCIDRMaskIPV4"
 	// VMSetCIDRIPV6TagKey specifies the node ipv6 CIDR mask of the instances on the VMSS or VMAS
 	VMSetCIDRIPV6TagKey = "kubernetesNodeCIDRMaskIPV6"
+	// VmssWindows2019ImageGalleryName is the name of Windows 2019 images from the
+	// Microsoft.Compute/galleries/AKSWindows gallery
+	VmssWindows2019ImageGalleryName = "windows-2019-containerd"
+	// Windows2019OSBuildVersion is the official build version of Windows Server 2019
+	// https://learn.microsoft.com/en-us/windows-server/get-started/windows-server-release-info
+	Windows2019OSBuildVersion = "17763"
 
 	// TagsDelimiter is the delimiter of tags
 	TagsDelimiter = ","
@@ -132,6 +138,8 @@ const (
 	ProvisioningStateDeleting = "Deleting"
 	// ProvisioningStateSucceeded ...
 	ProvisioningStateSucceeded = "Succeeded"
+	// ProvisioningStateUnknown is the unknown provisioning state
+	ProvisioningStateUnknown = "Unknown"
 )
 
 // cache
@@ -377,6 +385,8 @@ const (
 	FrontendIPConfigNameMaxLength = 80
 	// LoadBalancerRuleNameMaxLength is the max length of the load balancing rule
 	LoadBalancerRuleNameMaxLength = 80
+	// PIPPrefixNameMaxLength is the max length of the PIP prefix name
+	PIPPrefixNameMaxLength = 80
 	// IPFamilySuffixLength is the length of suffix length of IP family ("-IPv4", "-IPv6")
 	IPFamilySuffixLength = 5
 
@@ -401,14 +411,16 @@ const (
 	ReferencedResourceNotProvisionedMessageCode = "ReferencedResourceNotProvisioned"
 	// ParentResourceNotFoundMessageCode is the error code that the parent VMSS of the VM is not found.
 	ParentResourceNotFoundMessageCode = "ParentResourceNotFound"
+	// ResourceNotFoundMessageCode is the error code that the resource is not found.
+	ResourceNotFoundMessageCode = "ResourceNotFound"
 	// ConcurrentRequestConflictMessage is the error message that the request failed due to the conflict with another concurrent operation.
 	ConcurrentRequestConflictMessage = "The request failed due to conflict with a concurrent request."
 	// CannotUpdateVMBeingDeletedMessagePrefix is the prefix of the error message that the request failed due to delete a VM that is being deleted
 	CannotUpdateVMBeingDeletedMessagePrefix = "'Put on Virtual Machine Scale Set VM Instance' is not allowed on Virtual Machine Scale Set"
 	// CannotUpdateVMBeingDeletedMessageSuffix is the suffix of the error message that the request failed due to delete a VM that is being deleted
 	CannotUpdateVMBeingDeletedMessageSuffix = "since it is marked for deletion"
-	// OperationPreemptedErrorCode is the error code returned for vm operation preempted errors
-	OperationPreemptedErrorCode = "OperationPreempted"
+	// OperationPreemptedErrorMessage is the error message returned for vm operation preempted errors
+	OperationPreemptedErrorMessage = "Operation execution has been preempted by a more recent operation"
 )
 
 // node ipam controller
@@ -569,4 +581,27 @@ const (
 	ClusterServiceLoadBalancerHealthProbeDefaultPort         = 10256
 	ClusterServiceLoadBalancerHealthProbeDefaultPath         = "/healthz"
 	SharedProbeName                                          = "cluster-service-shared-health-probe"
+)
+
+// VM power state
+const (
+	VMPowerStatePrefix       = "PowerState/"
+	VMPowerStateStopped      = "stopped"
+	VMPowerStateStopping     = "stopping"
+	VMPowerStateDeallocated  = "deallocated"
+	VMPowerStateDeallocating = "deallocating"
+	VMPowerStateUnknown      = "unknown"
+)
+
+// Azure resource lock
+const (
+	AzureResourceLockHolderNameCloudControllerManager = "cloud-controller-manager"
+	AzureResourceLockLeaseName                        = "aks-managed-resource-locker"
+	AzureResourceLockLeaseNamespace                   = "kube-system"
+	AzureResourceLockLeaseDuration                    = int32(15 * 60)
+	AzureResourceLockPreviousHolderNameAnnotation     = "aks-managed-resource-locker-previous-holder"
+
+	AzureResourceLockFailedToLockErrorTemplate                = "%s failed due to fail to lock azure resources. This may because another component is trying to update azure resources, e.g., load balancers. This will be automatically retried by cloud provider exponentially: %w"
+	AzureResourceLockFailedToUnlockErrorTemplate              = "%s failed due to fail to unlock azure resources. This will be automatically retried by cloud provider exponentially, but can also be manually unlocked by removing the holder of the lease '%s/%s'. Before doing this, please be aware that this could lead to unexpected issues: %w"
+	AzureResourceLockFailedToReconcileWithUnlockErrorTemplate = "%s failed due to %s, and when unlocking azure resources another error happened: %w"
 )

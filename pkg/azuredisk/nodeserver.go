@@ -331,7 +331,7 @@ func (d *Driver) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest) (*c
 			failureDomainFromLabels, instanceTypeFromLabels, err = getNodeInfoFromLabels(ctx, d.NodeID, d.cloud.KubeClient)
 		} else {
 			if runtime.GOOS == "windows" && (!d.cloud.UseInstanceMetadata || d.cloud.Metadata == nil) {
-				zone, err = d.cloud.VMSet.GetZoneByNodeName(d.NodeID)
+				zone, err = d.cloud.VMSet.GetZoneByNodeName(ctx, d.NodeID)
 			} else {
 				zone, err = d.cloud.GetZone(ctx)
 			}
@@ -365,7 +365,7 @@ func (d *Driver) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest) (*c
 		} else {
 			if runtime.GOOS == "windows" && d.cloud.UseInstanceMetadata && d.cloud.Metadata != nil {
 				var metadata *azure.InstanceMetadata
-				metadata, err = d.cloud.Metadata.GetMetadata(azcache.CacheReadTypeDefault)
+				metadata, err = d.cloud.Metadata.GetMetadata(ctx, azcache.CacheReadTypeDefault)
 				if err == nil && metadata != nil && metadata.Compute != nil {
 					instanceType = metadata.Compute.VMSize
 					klog.V(2).Infof("NodeGetInfo: nodeName(%s), VM Size(%s)", d.NodeID, instanceType)
@@ -397,7 +397,7 @@ func (d *Driver) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest) (*c
 
 	nodeID := d.NodeID
 	if d.getNodeIDFromIMDS && d.cloud.UseInstanceMetadata && d.cloud.Metadata != nil {
-		metadata, err := d.cloud.Metadata.GetMetadata(azcache.CacheReadTypeDefault)
+		metadata, err := d.cloud.Metadata.GetMetadata(ctx, azcache.CacheReadTypeDefault)
 		if err == nil && metadata != nil && metadata.Compute != nil {
 			klog.V(2).Infof("NodeGetInfo: NodeID(%s), metadata.Compute.Name(%s)", d.NodeID, metadata.Compute.Name)
 			if metadata.Compute.Name != "" {
@@ -481,12 +481,12 @@ func (d *Driver) NodeExpandVolume(_ context.Context, req *csi.NodeExpandVolumeRe
 
 	if isBlock {
 		if d.enableDiskOnlineResize {
-			klog.V(2).Info("NodeExpandVolume begin to rescan all devices on block volume(%s)", volumeID)
+			klog.V(2).Infof("NodeExpandVolume begin to rescan all devices on block volume(%s)", volumeID)
 			if err := rescanAllVolumes(d.ioHandler); err != nil {
 				klog.Errorf("NodeExpandVolume rescanAllVolumes failed with error: %v", err)
 			}
 		}
-		klog.V(2).Info("NodeExpandVolume skip resize operation on block volume(%s)", volumeID)
+		klog.V(2).Infof("NodeExpandVolume skip resize operation on block volume(%s)", volumeID)
 		return &csi.NodeExpandVolumeResponse{}, nil
 	}
 
@@ -501,7 +501,7 @@ func (d *Driver) NodeExpandVolume(_ context.Context, req *csi.NodeExpandVolumeRe
 	}
 
 	if d.enableDiskOnlineResize {
-		klog.V(2).Info("NodeExpandVolume begin to rescan device %s on volume(%s)", devicePath, volumeID)
+		klog.V(2).Infof("NodeExpandVolume begin to rescan device %s on volume(%s)", devicePath, volumeID)
 		if err := rescanVolume(d.ioHandler, devicePath); err != nil {
 			klog.Errorf("NodeExpandVolume rescanVolume failed with error: %v", err)
 		}

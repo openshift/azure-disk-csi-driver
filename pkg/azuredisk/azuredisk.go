@@ -18,20 +18,29 @@ package azuredisk
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute" //nolint: staticcheck
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
@@ -44,44 +53,22 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/mounter"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	volumehelper "sigs.k8s.io/azuredisk-csi-driver/pkg/util"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	azurecloudconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
 
-// DriverOptions defines driver parameters specified in driver deployment
-type DriverOptions struct {
-	NodeID                       string
-	DriverName                   string
-	VolumeAttachLimit            int64
-	ReservedDataDiskSlotNum      int64
-	EnablePerfOptimization       bool
-	CloudConfigSecretName        string
-	CloudConfigSecretNamespace   string
-	CustomUserAgent              string
-	UserAgentSuffix              string
-	UseCSIProxyGAInterface       bool
-	EnableDiskOnlineResize       bool
-	AllowEmptyCloudConfig        bool
-	EnableAsyncAttach            bool
-	EnableListVolumes            bool
-	EnableListSnapshots          bool
-	SupportZone                  bool
-	GetNodeInfoFromLabels        bool
-	EnableDiskCapacityCheck      bool
-	DisableUpdateCache           bool
-	EnableTrafficManager         bool
-	TrafficManagerPort           int64
-	AttachDetachInitialDelayInMs int64
-	VMSSCacheTTLInSeconds        int64
-	VolStatsCacheExpireInMinutes int64
-	VMType                       string
-	EnableWindowsHostProcess     bool
-	GetNodeIDFromIMDS            bool
-	EnableOtelTracing            bool
-	WaitForSnapshotReady         bool
-	CheckDiskLUNCollision        bool
-}
+var (
+	// taintRemovalInitialDelay is the initial delay for node taint removal
+	taintRemovalInitialDelay = 1 * time.Second
+	// taintRemovalBackoff is the exponential backoff configuration for node taint removal
+	taintRemovalBackoff = wait.Backoff{
+		Duration: 500 * time.Millisecond,
+		Factor:   2,
+		Steps:    10, // Max delay = 0.5 * 2^9 = ~4 minutes
+	}
+)
 
 // CSIDriver defines the interface for a CSI driver.
 type CSIDriver interface {
@@ -89,7 +76,7 @@ type CSIDriver interface {
 	csi.NodeServer
 	csi.IdentityServer
 
-	Run(endpoint, kubeconfig string, disableAVSetNodes, testMode bool)
+	Run(ctx context.Context) error
 }
 
 type hostUtil interface {
@@ -104,8 +91,9 @@ type DriverCore struct {
 	cloudConfigSecretNamespace   string
 	customUserAgent              string
 	userAgentSuffix              string
-	kubeconfig                   string
 	cloud                        *azure.Cloud
+	clientFactory                azclient.ClientFactory
+	diskController               *ManagedDiskController
 	mounter                      *mount.SafeFormatAndMount
 	deviceHelper                 optimization.Interface
 	nodeInfo                     *optimization.NodeInfo
@@ -114,7 +102,6 @@ type DriverCore struct {
 	useCSIProxyGAInterface       bool
 	enableDiskOnlineResize       bool
 	allowEmptyCloudConfig        bool
-	enableAsyncAttach            bool
 	enableListVolumes            bool
 	enableListSnapshots          bool
 	supportZone                  bool
@@ -132,8 +119,15 @@ type DriverCore struct {
 	enableOtelTracing            bool
 	shouldWaitForSnapshotReady   bool
 	checkDiskLUNCollision        bool
+	forceDetachBackoff           bool
+	endpoint                     string
+	disableAVSetNodes            bool
+	removeNotReadyTaint          bool
+	kubeClient                   kubernetes.Interface
 	// a timed cache storing volume stats <volumeID, volumeStats>
-	volStatsCache azcache.Resource
+	volStatsCache           azcache.Resource
+	maxConcurrentFormat     int64
+	concurrentFormatTimeout int64
 }
 
 // Driver is the v1 implementation of the Azure Disk CSI Driver.
@@ -163,7 +157,6 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.useCSIProxyGAInterface = options.UseCSIProxyGAInterface
 	driver.enableDiskOnlineResize = options.EnableDiskOnlineResize
 	driver.allowEmptyCloudConfig = options.AllowEmptyCloudConfig
-	driver.enableAsyncAttach = options.EnableAsyncAttach
 	driver.enableListVolumes = options.EnableListVolumes
 	driver.enableListSnapshots = options.EnableListVolumes
 	driver.supportZone = options.SupportZone
@@ -181,13 +174,22 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.enableOtelTracing = options.EnableOtelTracing
 	driver.shouldWaitForSnapshotReady = options.WaitForSnapshotReady
 	driver.checkDiskLUNCollision = options.CheckDiskLUNCollision
+	driver.forceDetachBackoff = options.ForceDetachBackoff
+	driver.endpoint = options.Endpoint
+	driver.disableAVSetNodes = options.DisableAVSetNodes
+	driver.removeNotReadyTaint = options.RemoveNotReadyTaint
+	driver.maxConcurrentFormat = options.MaxConcurrentFormat
+	driver.concurrentFormatTimeout = options.ConcurrentFormatTimeout
 	driver.volumeLocks = volumehelper.NewVolumeLocks()
 	driver.ioHandler = azureutils.NewOSIOHandler()
 	driver.hostUtil = hostutil.NewHostUtil()
-
+	if driver.NodeID == "" {
+		// nodeid is not needed in controller component
+		klog.Warning("nodeid is empty")
+	}
 	topologyKey = fmt.Sprintf("topology.%s/zone", driver.Name)
 
-	getter := func(_ string) (interface{}, error) { return nil, nil }
+	getter := func(_ context.Context, _ string) (interface{}, error) { return nil, nil }
 	var err error
 	if driver.throttlingCache, err = azcache.NewTimedCache(5*time.Minute, getter, false); err != nil {
 		klog.Fatalf("%v", err)
@@ -195,80 +197,77 @@ func newDriverV1(options *DriverOptions) *Driver {
 	if driver.checkDiskLunThrottlingCache, err = azcache.NewTimedCache(30*time.Minute, getter, false); err != nil {
 		klog.Fatalf("%v", err)
 	}
+
 	if options.VolStatsCacheExpireInMinutes <= 0 {
 		options.VolStatsCacheExpireInMinutes = 10 // default expire in 10 minutes
 	}
 	if driver.volStatsCache, err = azcache.NewTimedCache(time.Duration(options.VolStatsCacheExpireInMinutes)*time.Minute, getter, false); err != nil {
 		klog.Fatalf("%v", err)
 	}
-	return &driver
-}
 
-// Run driver initialization
-func (d *Driver) Run(endpoint, kubeconfig string, disableAVSetNodes, testingMock bool) {
-	versionMeta, err := GetVersionYAML(d.Name)
-	if err != nil {
-		klog.Fatalf("%v", err)
-	}
-	klog.Infof("\nDRIVER INFORMATION:\n-------------------\n%s\n\nStreaming logs below:", versionMeta)
-
-	userAgent := GetUserAgent(d.Name, d.customUserAgent, d.userAgentSuffix)
+	userAgent := GetUserAgent(driver.Name, driver.customUserAgent, driver.userAgentSuffix)
 	klog.V(2).Infof("driver userAgent: %s", userAgent)
 
-	cloud, err := azureutils.GetCloudProvider(context.Background(), kubeconfig, d.cloudConfigSecretName, d.cloudConfigSecretNamespace,
-		userAgent, d.allowEmptyCloudConfig, d.enableTrafficManager, d.trafficManagerPort)
+	kubeClient, err := azureutils.GetKubeClient(options.Kubeconfig)
+	if err != nil {
+		klog.Warningf("get kubeconfig(%s) failed with error: %v", options.Kubeconfig, err)
+	}
+	driver.kubeClient = kubeClient
+
+	cloud, err := azureutils.GetCloudProviderFromClient(context.Background(), kubeClient, driver.cloudConfigSecretName, driver.cloudConfigSecretNamespace,
+		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.trafficManagerPort)
 	if err != nil {
 		klog.Fatalf("failed to get Azure Cloud Provider, error: %v", err)
 	}
-	d.cloud = cloud
-	d.kubeconfig = kubeconfig
+	driver.cloud = cloud
 
-	if d.cloud != nil {
-		if d.vmType != "" {
-			klog.V(2).Infof("override VMType(%s) in cloud config as %s", d.cloud.VMType, d.vmType)
-			d.cloud.VMType = d.vmType
+	if driver.cloud != nil {
+		driver.clientFactory = driver.cloud.ComputeClientFactory
+		if driver.vmType != "" {
+			klog.V(2).Infof("override VMType(%s) in cloud config as %s", driver.cloud.VMType, driver.vmType)
+			driver.cloud.VMType = driver.vmType
 		}
 
-		if d.NodeID == "" {
+		if driver.NodeID == "" {
 			// Disable UseInstanceMetadata for controller to mitigate a timeout issue using IMDS
 			// https://github.com/kubernetes-sigs/azuredisk-csi-driver/issues/168
 			klog.V(2).Infof("disable UseInstanceMetadata for controller")
-			d.cloud.Config.UseInstanceMetadata = false
+			driver.cloud.Config.UseInstanceMetadata = false
 
-			if d.cloud.VMType == azurecloudconsts.VMTypeStandard && d.cloud.DisableAvailabilitySetNodes {
-				klog.V(2).Infof("set DisableAvailabilitySetNodes as false since VMType is %s", d.cloud.VMType)
-				d.cloud.DisableAvailabilitySetNodes = false
+			if driver.cloud.VMType == azurecloudconsts.VMTypeStandard && driver.cloud.DisableAvailabilitySetNodes {
+				klog.V(2).Infof("set DisableAvailabilitySetNodes as false since VMType is %s", driver.cloud.VMType)
+				driver.cloud.DisableAvailabilitySetNodes = false
 			}
 
-			if d.cloud.VMType == azurecloudconsts.VMTypeVMSS && !d.cloud.DisableAvailabilitySetNodes && disableAVSetNodes {
+			if driver.cloud.VMType == azurecloudconsts.VMTypeVMSS && !driver.cloud.DisableAvailabilitySetNodes && driver.disableAVSetNodes {
 				klog.V(2).Infof("DisableAvailabilitySetNodes for controller since current VMType is vmss")
-				d.cloud.DisableAvailabilitySetNodes = true
+				driver.cloud.DisableAvailabilitySetNodes = true
 			}
-			klog.V(2).Infof("cloud: %s, location: %s, rg: %s, VMType: %s, PrimaryScaleSetName: %s, PrimaryAvailabilitySetName: %s, DisableAvailabilitySetNodes: %v", d.cloud.Cloud, d.cloud.Location, d.cloud.ResourceGroup, d.cloud.VMType, d.cloud.PrimaryScaleSetName, d.cloud.PrimaryAvailabilitySetName, d.cloud.DisableAvailabilitySetNodes)
+			klog.V(2).Infof("cloud: %s, location: %s, rg: %s, VMType: %s, PrimaryScaleSetName: %s, PrimaryAvailabilitySetName: %s, DisableAvailabilitySetNodes: %v", driver.cloud.Cloud, driver.cloud.Location, driver.cloud.ResourceGroup, driver.cloud.VMType, driver.cloud.PrimaryScaleSetName, driver.cloud.PrimaryAvailabilitySetName, driver.cloud.DisableAvailabilitySetNodes)
 		}
 
-		if d.vmssCacheTTLInSeconds > 0 {
-			klog.V(2).Infof("reset vmssCacheTTLInSeconds as %d", d.vmssCacheTTLInSeconds)
-			d.cloud.VMCacheTTLInSeconds = int(d.vmssCacheTTLInSeconds)
-			d.cloud.VmssCacheTTLInSeconds = int(d.vmssCacheTTLInSeconds)
+		if driver.vmssCacheTTLInSeconds > 0 {
+			klog.V(2).Infof("reset vmssCacheTTLInSeconds as %d", driver.vmssCacheTTLInSeconds)
+			driver.cloud.VMCacheTTLInSeconds = int(driver.vmssCacheTTLInSeconds)
+			driver.cloud.VmssCacheTTLInSeconds = int(driver.vmssCacheTTLInSeconds)
 		}
 
-		if d.cloud.ManagedDiskController != nil {
-			d.cloud.DisableUpdateCache = d.disableUpdateCache
-			d.cloud.AttachDetachInitialDelayInMs = int(d.attachDetachInitialDelayInMs)
-		}
+		driver.diskController = NewManagedDiskController(driver.cloud)
+		driver.diskController.DisableUpdateCache = driver.disableUpdateCache
+		driver.diskController.AttachDetachInitialDelayInMs = int(driver.attachDetachInitialDelayInMs)
+		driver.diskController.ForceDetachBackoff = driver.forceDetachBackoff
 	}
 
-	d.deviceHelper = optimization.NewSafeDeviceHelper()
+	driver.deviceHelper = optimization.NewSafeDeviceHelper()
 
-	if d.getPerfOptimizationEnabled() {
-		d.nodeInfo, err = optimization.NewNodeInfo(context.TODO(), d.getCloud(), d.NodeID)
+	if driver.getPerfOptimizationEnabled() {
+		driver.nodeInfo, err = optimization.NewNodeInfo(context.TODO(), driver.getCloud(), driver.NodeID)
 		if err != nil {
 			klog.Warningf("Failed to get node info. Error: %v", err)
 		}
 	}
 
-	d.mounter, err = mounter.NewSafeMounter(d.enableWindowsHostProcess, d.useCSIProxyGAInterface)
+	driver.mounter, err = mounter.NewSafeMounter(driver.enableWindowsHostProcess, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
 	if err != nil {
 		klog.Fatalf("Failed to get safe mounter. Error: %v", err)
 	}
@@ -280,37 +279,93 @@ func (d *Driver) Run(endpoint, kubeconfig string, disableAVSetNodes, testingMock
 		csi.ControllerServiceCapability_RPC_CLONE_VOLUME,
 		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 		csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
+		csi.ControllerServiceCapability_RPC_MODIFY_VOLUME,
 	}
-	if d.enableListVolumes {
+	if driver.enableListVolumes {
 		controllerCap = append(controllerCap, csi.ControllerServiceCapability_RPC_LIST_VOLUMES, csi.ControllerServiceCapability_RPC_LIST_VOLUMES_PUBLISHED_NODES)
 	}
-	if d.enableListSnapshots {
+	if driver.enableListSnapshots {
 		controllerCap = append(controllerCap, csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS)
 	}
 
-	d.AddControllerServiceCapabilities(controllerCap)
-	d.AddVolumeCapabilityAccessModes(
+	driver.AddControllerServiceCapabilities(controllerCap)
+	driver.AddVolumeCapabilityAccessModes(
 		[]csi.VolumeCapability_AccessMode_Mode{
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
 		})
-	d.AddNodeServiceCapabilities([]csi.NodeServiceCapability_RPC_Type{
+	driver.AddNodeServiceCapabilities([]csi.NodeServiceCapability_RPC_Type{
 		csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
 		csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
 		csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
 		csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
 	})
 
-	s := csicommon.NewNonBlockingGRPCServer()
+	if kubeClient != nil && driver.removeNotReadyTaint && driver.NodeID != "" {
+		// Remove taint from node to indicate driver startup success
+		// This is done at the last possible moment to prevent race conditions or false positive removals
+		time.AfterFunc(taintRemovalInitialDelay, func() {
+			removeTaintInBackground(kubeClient, driver.NodeID, driver.Name, taintRemovalBackoff, removeNotReadyTaint)
+		})
+	}
+	return &driver
+}
+
+// Run driver initialization
+func (d *Driver) Run(ctx context.Context) error {
+	versionMeta, err := GetVersionYAML(d.Name)
+	if err != nil {
+		klog.Fatalf("%v", err)
+	}
+	klog.Infof("\nDRIVER INFORMATION:\n-------------------\n%s\n\nStreaming logs below:", versionMeta)
+
+	opts := []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(
+			grpcprom.NewServerMetrics().UnaryServerInterceptor(),
+			csicommon.LogGRPC,
+		),
+	}
+	if d.enableOtelTracing {
+		exporter, err := InitOtelTracing()
+		if err != nil {
+			klog.Fatalf("Failed to initialize otel tracing: %v", err)
+		}
+		// Exporter will flush traces on shutdown
+		defer func() {
+			if err := exporter.Shutdown(context.Background()); err != nil {
+				klog.Errorf("Could not shutdown otel exporter: %v", err)
+			}
+		}()
+		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+
+	s := grpc.NewServer(opts...)
+	csi.RegisterIdentityServer(s, d)
+	csi.RegisterControllerServer(s, d)
+	csi.RegisterNodeServer(s, d)
+
+	go func() {
+		//graceful shutdown
+		<-ctx.Done()
+		s.GracefulStop()
+	}()
 	// Driver d act as IdentityServer, ControllerServer and NodeServer
-	s.Start(endpoint, d, d, d, testingMock, d.enableOtelTracing)
-	s.Wait()
+	listener, err := csicommon.Listen(ctx, d.endpoint)
+	if err != nil {
+		klog.Fatalf("failed to listen to endpoint, error: %v", err)
+	}
+	err = s.Serve(listener)
+	if errors.Is(err, grpc.ErrServerStopped) {
+		klog.Infof("gRPC server stopped serving")
+		return nil
+	}
+	return err
 }
 
 func (d *Driver) isGetDiskThrottled() bool {
-	cache, err := d.throttlingCache.Get(consts.GetDiskThrottlingKey, azcache.CacheReadTypeDefault)
+	cache, err := d.throttlingCache.Get(context.Background(), consts.GetDiskThrottlingKey, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Warningf("throttlingCache(%s) return with error: %s", consts.GetDiskThrottlingKey, err)
 		return false
@@ -319,7 +374,7 @@ func (d *Driver) isGetDiskThrottled() bool {
 }
 
 func (d *Driver) isCheckDiskLunThrottled() bool {
-	cache, err := d.checkDiskLunThrottlingCache.Get(consts.CheckDiskLunThrottlingKey, azcache.CacheReadTypeDefault)
+	cache, err := d.checkDiskLunThrottlingCache.Get(context.Background(), consts.CheckDiskLunThrottlingKey, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Warningf("throttlingCache(%s) return with error: %s", consts.CheckDiskLunThrottlingKey, err)
 		return false
@@ -327,7 +382,7 @@ func (d *Driver) isCheckDiskLunThrottled() bool {
 	return cache != nil
 }
 
-func (d *Driver) checkDiskExists(ctx context.Context, diskURI string) (*compute.Disk, error) {
+func (d *Driver) checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error) {
 	diskName, err := azureutils.GetDiskName(diskURI)
 	if err != nil {
 		return nil, err
@@ -343,17 +398,15 @@ func (d *Driver) checkDiskExists(ctx context.Context, diskURI string) (*compute.
 		return nil, nil
 	}
 	subsID := azureutils.GetSubscriptionIDFromURI(diskURI)
-	disk, rerr := d.cloud.DisksClient.Get(ctx, subsID, resourceGroup, diskName)
-	if rerr != nil {
-		if rerr.IsThrottled() || strings.Contains(rerr.RawError.Error(), consts.RateLimited) {
-			klog.Warningf("checkDiskExists(%s) is throttled with error: %v", diskURI, rerr.Error())
-			d.throttlingCache.Set(consts.GetDiskThrottlingKey, "")
-			return nil, nil
-		}
-		return nil, rerr.Error()
+	diskClient, err := d.diskController.clientFactory.GetDiskClientForSub(subsID)
+	if err != nil {
+		return nil, err
 	}
-
-	return &disk, nil
+	disk, err := diskClient.Get(ctx, resourceGroup, diskName)
+	if err != nil {
+		return nil, err
+	}
+	return disk, nil
 }
 
 func (d *Driver) checkDiskCapacity(ctx context.Context, subsID, resourceGroup, diskName string, requestGiB int) (bool, error) {
@@ -361,18 +414,16 @@ func (d *Driver) checkDiskCapacity(ctx context.Context, subsID, resourceGroup, d
 		klog.Warningf("skip checkDiskCapacity(%s, %s) since it's still in throttling", resourceGroup, diskName)
 		return true, nil
 	}
-
-	disk, rerr := d.cloud.DisksClient.Get(ctx, subsID, resourceGroup, diskName)
+	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
+	if err != nil {
+		return false, err
+	}
+	disk, err := diskClient.Get(ctx, resourceGroup, diskName)
 	// Because we can not judge the reason of the error. Maybe the disk does not exist.
 	// So here we do not handle the error.
-	if rerr == nil {
-		if !reflect.DeepEqual(disk, compute.Disk{}) && disk.DiskSizeGB != nil && int(*disk.DiskSizeGB) != requestGiB {
-			return false, status.Errorf(codes.AlreadyExists, "the request volume already exists, but its capacity(%v) is different from (%v)", *disk.DiskProperties.DiskSizeGB, requestGiB)
-		}
-	} else {
-		if rerr.IsThrottled() || strings.Contains(rerr.RawError.Error(), consts.RateLimited) {
-			klog.Warningf("checkDiskCapacity(%s, %s) is throttled with error: %v", resourceGroup, diskName, rerr.Error())
-			d.throttlingCache.Set(consts.GetDiskThrottlingKey, "")
+	if err == nil {
+		if !reflect.DeepEqual(disk, armcompute.Disk{}) && disk.Properties.DiskSizeGB != nil && int(*disk.Properties.DiskSizeGB) != requestGiB {
+			return false, status.Errorf(codes.AlreadyExists, "the request volume already exists, but its capacity(%v) is different from (%v)", *disk.Properties.DiskSizeGB, requestGiB)
 		}
 	}
 	return true, nil
@@ -452,19 +503,23 @@ func (d *DriverCore) getHostUtil() hostUtil {
 }
 
 // getSnapshotCompletionPercent returns the completion percent of snapshot
-func (d *DriverCore) getSnapshotCompletionPercent(ctx context.Context, subsID, resourceGroup, snapshotName string) (float64, error) {
-	copySnapshot, rerr := d.cloud.SnapshotsClient.Get(ctx, subsID, resourceGroup, snapshotName)
-	if rerr != nil {
-		return 0.0, rerr.Error()
+func (d *DriverCore) getSnapshotCompletionPercent(ctx context.Context, subsID, resourceGroup, snapshotName string) (float32, error) {
+	snapshotClient, err := d.clientFactory.GetSnapshotClientForSub(subsID)
+	if err != nil {
+		return 0.0, err
+	}
+	copySnapshot, err := snapshotClient.Get(ctx, resourceGroup, snapshotName)
+	if err != nil {
+		return 0.0, err
 	}
 
-	if copySnapshot.SnapshotProperties == nil || copySnapshot.SnapshotProperties.CompletionPercent == nil {
+	if copySnapshot.Properties == nil || copySnapshot.Properties.CompletionPercent == nil {
 		// If CompletionPercent is nil, it means the snapshot is complete
 		klog.V(2).Infof("snapshot(%s) under rg(%s) has no SnapshotProperties or CompletionPercent is nil", snapshotName, resourceGroup)
 		return 100.0, nil
 	}
 
-	return *copySnapshot.SnapshotProperties.CompletionPercent, nil
+	return *copySnapshot.Properties.CompletionPercent, nil
 }
 
 // waitForSnapshotReady wait for completionPercent of snapshot is 100.0
@@ -474,7 +529,7 @@ func (d *DriverCore) waitForSnapshotReady(ctx context.Context, subsID, resourceG
 		return err
 	}
 
-	if completionPercent >= float64(100.0) {
+	if completionPercent >= float32(100.0) {
 		klog.V(2).Infof("snapshot(%s) under rg(%s) complete", snapshotName, resourceGroup)
 		return nil
 	}
@@ -489,7 +544,7 @@ func (d *DriverCore) waitForSnapshotReady(ctx context.Context, subsID, resourceG
 				return err
 			}
 
-			if completionPercent >= float64(100.0) {
+			if completionPercent >= float32(100.0) {
 				klog.V(2).Infof("snapshot(%s) under rg(%s) complete", snapshotName, resourceGroup)
 				return nil
 			}
@@ -539,7 +594,7 @@ func (d *DriverCore) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeN
 
 // getUsedLunsFromNode returns a list of sorted used luns from Node
 func (d *DriverCore) getUsedLunsFromNode(nodeName types.NodeName) ([]int, error) {
-	disks, _, err := d.cloud.GetNodeDataDisks(nodeName, azcache.CacheReadTypeDefault)
+	disks, _, err := d.diskController.GetNodeDataDisks(nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %s: %v", nodeName, err)
 		return nil, err
@@ -618,4 +673,103 @@ func getVMSSInstanceName(computeName string) (string, error) {
 		return "", fmt.Errorf("parsing vmss compute name(%s) failed with %v", computeName, err)
 	}
 	return fmt.Sprintf("%s%06s", names[0], strconv.FormatInt(int64(instanceID), 36)), nil
+}
+
+// Struct for JSON patch operations
+type JSONPatch struct {
+	OP    string      `json:"op,omitempty"`
+	Path  string      `json:"path,omitempty"`
+	Value interface{} `json:"value"`
+}
+
+// removeTaintInBackground is a goroutine that retries removeNotReadyTaint with exponential backoff
+func removeTaintInBackground(k8sClient kubernetes.Interface, nodeName, driverName string, backoff wait.Backoff, removalFunc func(kubernetes.Interface, string, string) error) {
+	backoffErr := wait.ExponentialBackoff(backoff, func() (bool, error) {
+		err := removalFunc(k8sClient, nodeName, driverName)
+		if err != nil {
+			klog.ErrorS(err, "Unexpected failure when attempting to remove node taint(s)")
+			return false, nil
+		}
+		return true, nil
+	})
+
+	if backoffErr != nil {
+		klog.ErrorS(backoffErr, "Retries exhausted, giving up attempting to remove node taint(s)")
+	}
+}
+
+// removeNotReadyTaint removes the taint disk.csi.azure.com/agent-not-ready from the local node
+// This taint can be optionally applied by users to prevent startup race conditions such as
+// https://github.com/kubernetes/kubernetes/issues/95911
+func removeNotReadyTaint(clientset kubernetes.Interface, nodeName, driverName string) error {
+	ctx := context.Background()
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	if err := checkAllocatable(ctx, clientset, nodeName, driverName); err != nil {
+		return err
+	}
+
+	taintKeyToRemove := driverName + consts.AgentNotReadyNodeTaintKeySuffix
+	klog.V(2).Infof("removing taint with key %s from local node %s", taintKeyToRemove, nodeName)
+	var taintsToKeep []corev1.Taint
+	for _, taint := range node.Spec.Taints {
+		klog.V(5).Infof("checking taint key %s, value %s, effect %s", taint.Key, taint.Value, taint.Effect)
+		if taint.Key != taintKeyToRemove {
+			taintsToKeep = append(taintsToKeep, taint)
+		} else {
+			klog.V(2).Infof("queued taint for removal with key %s, effect %s", taint.Key, taint.Effect)
+		}
+	}
+
+	if len(taintsToKeep) == len(node.Spec.Taints) {
+		klog.V(2).Infof("No taints to remove on node, skipping taint removal")
+		return nil
+	}
+
+	patchRemoveTaints := []JSONPatch{
+		{
+			OP:    "test",
+			Path:  "/spec/taints",
+			Value: node.Spec.Taints,
+		},
+		{
+			OP:    "replace",
+			Path:  "/spec/taints",
+			Value: taintsToKeep,
+		},
+	}
+
+	patch, err := json.Marshal(patchRemoveTaints)
+	if err != nil {
+		return err
+	}
+
+	_, err = clientset.CoreV1().Nodes().Patch(ctx, nodeName, k8stypes.JSONPatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		return err
+	}
+	klog.V(2).Infof("removed taint with key %s from local node %s successfully", taintKeyToRemove, nodeName)
+	return nil
+}
+
+func checkAllocatable(ctx context.Context, clientset kubernetes.Interface, nodeName, driverName string) error {
+	csiNode, err := clientset.StorageV1().CSINodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("isAllocatableSet: failed to get CSINode for %s: %w", nodeName, err)
+	}
+
+	for _, driver := range csiNode.Spec.Drivers {
+		if driver.Name == driverName {
+			if driver.Allocatable != nil && driver.Allocatable.Count != nil {
+				klog.V(2).Infof("CSINode Allocatable value is set for driver on node %s, count %d", nodeName, *driver.Allocatable.Count)
+				return nil
+			}
+			return fmt.Errorf("isAllocatableSet: allocatable value not set for driver on node %s", nodeName)
+		}
+	}
+
+	return fmt.Errorf("isAllocatableSet: driver not found on node %s", nodeName)
 }

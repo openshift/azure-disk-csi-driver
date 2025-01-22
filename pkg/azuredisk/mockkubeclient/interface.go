@@ -23,7 +23,7 @@ package mockkubeclient
 import (
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 	discovery "k8s.io/client-go/discovery"
 	v1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1"
 	v1alpha1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1alpha1"
@@ -47,6 +47,7 @@ import (
 	v1alpha19 "k8s.io/client-go/kubernetes/typed/certificates/v1alpha1"
 	v1beta14 "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
 	v16 "k8s.io/client-go/kubernetes/typed/coordination/v1"
+	v1alpha111 "k8s.io/client-go/kubernetes/typed/coordination/v1alpha1"
 	v1beta15 "k8s.io/client-go/kubernetes/typed/coordination/v1beta1"
 	v17 "k8s.io/client-go/kubernetes/typed/core/v1"
 	v18 "k8s.io/client-go/kubernetes/typed/discovery/v1"
@@ -54,7 +55,7 @@ import (
 	v19 "k8s.io/client-go/kubernetes/typed/events/v1"
 	v1beta17 "k8s.io/client-go/kubernetes/typed/events/v1beta1"
 	v1beta18 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
-	v1alpha12 "k8s.io/client-go/kubernetes/typed/flowcontrol/v1alpha1"
+	flowcontrolv1 "k8s.io/client-go/kubernetes/typed/flowcontrol/v1"
 	v1beta19 "k8s.io/client-go/kubernetes/typed/flowcontrol/v1beta1"
 	v1beta20 "k8s.io/client-go/kubernetes/typed/flowcontrol/v1beta2"
 	v1beta3 "k8s.io/client-go/kubernetes/typed/flowcontrol/v1beta3"
@@ -69,13 +70,14 @@ import (
 	v113 "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	v1alpha15 "k8s.io/client-go/kubernetes/typed/rbac/v1alpha1"
 	v1beta113 "k8s.io/client-go/kubernetes/typed/rbac/v1beta1"
-	v1alpha26 "k8s.io/client-go/kubernetes/typed/resource/v1alpha2"
+	v1alpha26 "k8s.io/client-go/kubernetes/typed/resource/v1alpha3"
 	v114 "k8s.io/client-go/kubernetes/typed/scheduling/v1"
 	v1alpha17 "k8s.io/client-go/kubernetes/typed/scheduling/v1alpha1"
 	v1beta114 "k8s.io/client-go/kubernetes/typed/scheduling/v1beta1"
 	v115 "k8s.io/client-go/kubernetes/typed/storage/v1"
 	v1alpha18 "k8s.io/client-go/kubernetes/typed/storage/v1alpha1"
 	v1beta115 "k8s.io/client-go/kubernetes/typed/storage/v1beta1"
+	v1alpha112 "k8s.io/client-go/kubernetes/typed/storagemigration/v1alpha1"
 )
 
 // MockInterface is a mock of Interface interface.
@@ -409,6 +411,20 @@ func (mr *MockInterfaceMockRecorder) CoordinationV1beta1() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CoordinationV1beta1", reflect.TypeOf((*MockInterface)(nil).CoordinationV1beta1))
 }
 
+// CoordinationV1alpha1 mocks base method.
+func (m *MockInterface) CoordinationV1alpha1() v1alpha111.CoordinationV1alpha1Interface {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CoordinationV1alpha1")
+	ret0, _ := ret[0].(v1alpha111.CoordinationV1alpha1Interface)
+	return ret0
+}
+
+// CoordinationV1alpha1 indicates an expected call of CoordinationV1alpha1.
+func (mr *MockInterfaceMockRecorder) CoordinationV1alpha1() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CoordinationV1alpha1", reflect.TypeOf((*MockInterface)(nil).CoordinationV1alpha1))
+}
+
 // CoreV1 mocks base method.
 func (m *MockInterface) CoreV1() v17.CoreV1Interface {
 	m.ctrl.T.Helper()
@@ -507,18 +523,18 @@ func (mr *MockInterfaceMockRecorder) ExtensionsV1beta1() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtensionsV1beta1", reflect.TypeOf((*MockInterface)(nil).ExtensionsV1beta1))
 }
 
-// FlowcontrolV1alpha1 mocks base method.
-func (m *MockInterface) FlowcontrolV1alpha1() v1alpha12.FlowcontrolV1alpha1Interface {
+// FlowcontrolV1beta1 mocks base method.
+func (m *MockInterface) FlowcontrolV1() flowcontrolv1.FlowcontrolV1Interface {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FlowcontrolV1alpha1")
-	ret0, _ := ret[0].(v1alpha12.FlowcontrolV1alpha1Interface)
+	ret := m.ctrl.Call(m, "FlowcontrolV1")
+	ret0, _ := ret[0].(flowcontrolv1.FlowcontrolV1Interface)
 	return ret0
 }
 
-// FlowcontrolV1alpha1 indicates an expected call of FlowcontrolV1alpha1.
-func (mr *MockInterfaceMockRecorder) FlowcontrolV1alpha1() *gomock.Call {
+// FlowcontrolV1 indicates an expected call of FlowcontrolV1.
+func (mr *MockInterfaceMockRecorder) FlowcontrolV1() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FlowcontrolV1alpha1", reflect.TypeOf((*MockInterface)(nil).FlowcontrolV1alpha1))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FlowcontrolV1", reflect.TypeOf((*MockInterface)(nil).FlowcontrolV1))
 }
 
 // FlowcontrolV1beta1 mocks base method.
@@ -732,17 +748,17 @@ func (mr *MockInterfaceMockRecorder) RbacV1beta1() *gomock.Call {
 }
 
 // ResourceV1alpha2 mocks base method.
-func (m *MockInterface) ResourceV1alpha2() v1alpha26.ResourceV1alpha2Interface {
+func (m *MockInterface) ResourceV1alpha3() v1alpha26.ResourceV1alpha3Interface {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ResourceV1alpha2")
-	ret0, _ := ret[0].(v1alpha26.ResourceV1alpha2Interface)
+	ret := m.ctrl.Call(m, "ResourceV1alpha3")
+	ret0, _ := ret[0].(v1alpha26.ResourceV1alpha3Interface)
 	return ret0
 }
 
 // ResourceV1alpha2 indicates an expected call of ResourceV1alpha2.
-func (mr *MockInterfaceMockRecorder) ResourceV1alpha2() *gomock.Call {
+func (mr *MockInterfaceMockRecorder) ResourceV1alpha3() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResourceV1alpha2", reflect.TypeOf((*MockInterface)(nil).ResourceV1alpha2))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResourceV1alpha3", reflect.TypeOf((*MockInterface)(nil).ResourceV1alpha3))
 }
 
 // SchedulingV1 mocks base method.
@@ -827,4 +843,18 @@ func (m *MockInterface) StorageV1beta1() v1beta115.StorageV1beta1Interface {
 func (mr *MockInterfaceMockRecorder) StorageV1beta1() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StorageV1beta1", reflect.TypeOf((*MockInterface)(nil).StorageV1beta1))
+}
+
+// StoragemigrationV1alpha1 mocks base method.
+func (m *MockInterface) StoragemigrationV1alpha1() v1alpha112.StoragemigrationV1alpha1Interface {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StoragemigrationV1alpha1")
+	ret0, _ := ret[0].(v1alpha112.StoragemigrationV1alpha1Interface)
+	return ret0
+}
+
+// StoragemigrationV1alpha1 indicates an expected call of StoragemigrationV1alpha1.
+func (mr *MockInterfaceMockRecorder) StoragemigrationV1alpha1() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StoragemigrationV1alpha1", reflect.TypeOf((*MockInterface)(nil).StoragemigrationV1alpha1))
 }

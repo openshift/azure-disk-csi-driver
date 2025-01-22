@@ -22,30 +22,48 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
+	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/metrics"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
+const AzureStackCloudAPIVersion = "2019-03-01"
+
 type Client struct {
 	*armcompute.DisksClient
+	subscriptionID string
+	tracer         tracing.Tracer
 }
 
 func New(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Interface, error) {
 	if options == nil {
 		options = utils.GetDefaultOption()
 	}
+	tr := options.TracingProvider.NewTracer(utils.ModuleName, utils.ModuleVersion)
 
 	client, err := armcompute.NewDisksClient(subscriptionID, credential, options)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{client}, nil
+	return &Client{
+		DisksClient:    client,
+		subscriptionID: subscriptionID,
+		tracer:         tr,
+	}, nil
 }
 
-// Get gets the Disk
-func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.Disk, rerr error) {
+const GetOperationName = "DisksClient.Get"
 
+// Get gets the Disk
+func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armcompute.Disk, err error) {
+
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "Disk", "get")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, GetOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := client.DisksClient.Get(ctx, resourceGroupName, resourceName, nil)
 	if err != nil {
 		return nil, err
@@ -54,8 +72,14 @@ func (client *Client) Get(ctx context.Context, resourceGroupName string, resourc
 	return &resp.Disk, nil
 }
 
+const CreateOrUpdateOperationName = "DisksClient.Create"
+
 // CreateOrUpdate creates or updates a Disk.
-func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armcompute.Disk) (*armcompute.Disk, error) {
+func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armcompute.Disk) (result *armcompute.Disk, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "Disk", "create_or_update")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, CreateOrUpdateOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := utils.NewPollerWrapper(client.DisksClient.BeginCreateOrUpdate(ctx, resourceGroupName, resourceName, resource, nil)).WaitforPollerResp(ctx)
 	if err != nil {
 		return nil, err
@@ -66,14 +90,26 @@ func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName stri
 	return nil, nil
 }
 
+const DeleteOperationName = "DisksClient.Delete"
+
 // Delete deletes a Disk by name.
-func (client *Client) Delete(ctx context.Context, resourceGroupName string, resourceName string) error {
-	_, err := utils.NewPollerWrapper(client.BeginDelete(ctx, resourceGroupName, resourceName, nil)).WaitforPollerResp(ctx)
+func (client *Client) Delete(ctx context.Context, resourceGroupName string, resourceName string) (err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "Disk", "delete")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, DeleteOperationName, client.tracer, nil)
+	defer endSpan(err)
+	_, err = utils.NewPollerWrapper(client.BeginDelete(ctx, resourceGroupName, resourceName, nil)).WaitforPollerResp(ctx)
 	return err
 }
 
+const ListOperationName = "DisksClient.List"
+
 // List gets a list of Disk in the resource group.
-func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.Disk, rerr error) {
+func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armcompute.Disk, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "Disk", "list")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, ListOperationName, client.tracer, nil)
+	defer endSpan(err)
 	pager := client.DisksClient.NewListByResourceGroupPager(resourceGroupName, nil)
 	for pager.More() {
 		nextResult, err := pager.NextPage(ctx)

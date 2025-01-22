@@ -22,30 +22,50 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	armnetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/tracing"
+	armnetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/metrics"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/policy/etag"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
+const AzureStackCloudAPIVersion = "2018-11-01"
+
 type Client struct {
 	*armnetwork.SecurityGroupsClient
+	subscriptionID string
+	tracer         tracing.Tracer
 }
 
 func New(subscriptionID string, credential azcore.TokenCredential, options *arm.ClientOptions) (Interface, error) {
 	if options == nil {
 		options = utils.GetDefaultOption()
 	}
+	tr := options.TracingProvider.NewTracer(utils.ModuleName, utils.ModuleVersion)
 
+	options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, utils.FuncPolicyWrapper(etag.AppendEtag))
 	client, err := armnetwork.NewSecurityGroupsClient(subscriptionID, credential, options)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{client}, nil
+	return &Client{
+		SecurityGroupsClient: client,
+		subscriptionID:       subscriptionID,
+		tracer:               tr,
+	}, nil
 }
 
-// Get gets the SecurityGroup
-func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armnetwork.SecurityGroup, rerr error) {
+const GetOperationName = "SecurityGroupsClient.Get"
 
+// Get gets the SecurityGroup
+func (client *Client) Get(ctx context.Context, resourceGroupName string, resourceName string) (result *armnetwork.SecurityGroup, err error) {
+
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SecurityGroup", "get")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, GetOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := client.SecurityGroupsClient.Get(ctx, resourceGroupName, resourceName, nil)
 	if err != nil {
 		return nil, err
@@ -54,8 +74,14 @@ func (client *Client) Get(ctx context.Context, resourceGroupName string, resourc
 	return &resp.SecurityGroup, nil
 }
 
+const CreateOrUpdateOperationName = "SecurityGroupsClient.Create"
+
 // CreateOrUpdate creates or updates a SecurityGroup.
-func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armnetwork.SecurityGroup) (*armnetwork.SecurityGroup, error) {
+func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceName string, resource armnetwork.SecurityGroup) (result *armnetwork.SecurityGroup, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SecurityGroup", "create_or_update")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, CreateOrUpdateOperationName, client.tracer, nil)
+	defer endSpan(err)
 	resp, err := utils.NewPollerWrapper(client.SecurityGroupsClient.BeginCreateOrUpdate(ctx, resourceGroupName, resourceName, resource, nil)).WaitforPollerResp(ctx)
 	if err != nil {
 		return nil, err
@@ -66,14 +92,26 @@ func (client *Client) CreateOrUpdate(ctx context.Context, resourceGroupName stri
 	return nil, nil
 }
 
+const DeleteOperationName = "SecurityGroupsClient.Delete"
+
 // Delete deletes a SecurityGroup by name.
-func (client *Client) Delete(ctx context.Context, resourceGroupName string, resourceName string) error {
-	_, err := utils.NewPollerWrapper(client.BeginDelete(ctx, resourceGroupName, resourceName, nil)).WaitforPollerResp(ctx)
+func (client *Client) Delete(ctx context.Context, resourceGroupName string, resourceName string) (err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SecurityGroup", "delete")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, DeleteOperationName, client.tracer, nil)
+	defer endSpan(err)
+	_, err = utils.NewPollerWrapper(client.BeginDelete(ctx, resourceGroupName, resourceName, nil)).WaitforPollerResp(ctx)
 	return err
 }
 
+const ListOperationName = "SecurityGroupsClient.List"
+
 // List gets a list of SecurityGroup in the resource group.
-func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armnetwork.SecurityGroup, rerr error) {
+func (client *Client) List(ctx context.Context, resourceGroupName string) (result []*armnetwork.SecurityGroup, err error) {
+	metricsCtx := metrics.BeginARMRequest(client.subscriptionID, resourceGroupName, "SecurityGroup", "list")
+	defer func() { metricsCtx.Observe(ctx, err) }()
+	ctx, endSpan := runtime.StartSpan(ctx, ListOperationName, client.tracer, nil)
+	defer endSpan(err)
 	pager := client.SecurityGroupsClient.NewListPager(resourceGroupName, nil)
 	for pager.More() {
 		nextResult, err := pager.NextPage(ctx)
