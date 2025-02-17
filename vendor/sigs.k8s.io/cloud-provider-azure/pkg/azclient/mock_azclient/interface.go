@@ -33,6 +33,7 @@ import (
 
 	accountclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/accountclient"
 	availabilitysetclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/availabilitysetclient"
+	backendaddresspoolclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/backendaddresspoolclient"
 	blobcontainerclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/blobcontainerclient"
 	blobservicepropertiesclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/blobservicepropertiesclient"
 	deploymentclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/deploymentclient"
@@ -44,6 +45,7 @@ import (
 	ipgroupclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/ipgroupclient"
 	loadbalancerclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/loadbalancerclient"
 	managedclusterclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/managedclusterclient"
+	privatednszonegroupclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatednszonegroupclient"
 	privateendpointclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/privateendpointclient"
 	privatelinkserviceclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatelinkserviceclient"
 	privatezoneclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatezoneclient"
@@ -132,6 +134,20 @@ func (m *MockClientFactory) GetAvailabilitySetClient() availabilitysetclient.Int
 func (mr *MockClientFactoryMockRecorder) GetAvailabilitySetClient() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAvailabilitySetClient", reflect.TypeOf((*MockClientFactory)(nil).GetAvailabilitySetClient))
+}
+
+// GetBackendAddressPoolClient mocks base method.
+func (m *MockClientFactory) GetBackendAddressPoolClient() backendaddresspoolclient.Interface {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetBackendAddressPoolClient")
+	ret0, _ := ret[0].(backendaddresspoolclient.Interface)
+	return ret0
+}
+
+// GetBackendAddressPoolClient indicates an expected call of GetBackendAddressPoolClient.
+func (mr *MockClientFactoryMockRecorder) GetBackendAddressPoolClient() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetBackendAddressPoolClient", reflect.TypeOf((*MockClientFactory)(nil).GetBackendAddressPoolClient))
 }
 
 // GetBlobContainerClient mocks base method.
@@ -361,6 +377,20 @@ func (m *MockClientFactory) GetManagedClusterClient() managedclusterclient.Inter
 func (mr *MockClientFactoryMockRecorder) GetManagedClusterClient() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetManagedClusterClient", reflect.TypeOf((*MockClientFactory)(nil).GetManagedClusterClient))
+}
+
+// GetPrivateDNSZoneGroupClient mocks base method.
+func (m *MockClientFactory) GetPrivateDNSZoneGroupClient() privatednszonegroupclient.Interface {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPrivateDNSZoneGroupClient")
+	ret0, _ := ret[0].(privatednszonegroupclient.Interface)
+	return ret0
+}
+
+// GetPrivateDNSZoneGroupClient indicates an expected call of GetPrivateDNSZoneGroupClient.
+func (mr *MockClientFactoryMockRecorder) GetPrivateDNSZoneGroupClient() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPrivateDNSZoneGroupClient", reflect.TypeOf((*MockClientFactory)(nil).GetPrivateDNSZoneGroupClient))
 }
 
 // GetPrivateEndpointClient mocks base method.
