@@ -84,9 +84,12 @@ func preparePublishPath(path string, m *mount.SafeFormatAndMount) error {
 	return fmt.Errorf("could not cast to csi proxy class")
 }
 
-func CleanupMountPoint(path string, m *mount.SafeFormatAndMount, extensiveCheck bool) error {
+func CleanupMountPoint(path string, m *mount.SafeFormatAndMount, unmountVolume bool) error {
 	if proxy, ok := m.Interface.(mounter.CSIProxyMounter); ok {
-		return proxy.Unmount(path)
+		if unmountVolume {
+			return proxy.Unmount(path)
+		}
+		return proxy.Rmdir(path)
 	}
 	return fmt.Errorf("could not cast to csi proxy class")
 }
@@ -151,7 +154,7 @@ func resizeVolume(devicePath, volumePath string, m *mount.SafeFormatAndMount) er
 
 // needResizeVolume check whether device needs resize
 func needResizeVolume(devicePath, volumePath string, m *mount.SafeFormatAndMount) (bool, error) {
-	return false, nil
+	return true, nil
 }
 
 // rescanVolume rescan device for detecting device size expansion

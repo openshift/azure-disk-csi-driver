@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -102,6 +101,8 @@ type controllerCommon struct {
 	// AttachDetachInitialDelayInMs determines initial delay in milliseconds for batch disk attach/detach
 	AttachDetachInitialDelayInMs int
 	ForceDetachBackoff           bool
+	// a timed cache for disk attach hitting max data disk count, <nodeName, "">
+	hitMaxDataDiskCountCache azcache.Resource
 }
 
 // ExtendedLocation contains additional info about the location of resources.
@@ -138,7 +139,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 				if errUpdate := c.UpdateVM(ctx, nodeName); errUpdate != nil {
 					return -1, errUpdate
 				}
-				lun, _, err := c.GetDiskLun(diskName, diskURI, nodeName)
+				lun, _, err := c.GetDiskLun(ctx, diskName, diskURI, nodeName)
 				return lun, err
 			}
 
@@ -188,18 +189,21 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	}
 	node := strings.ToLower(string(nodeName))
 	diskuri := strings.ToLower(diskURI)
+
+	isMaxDataDiskCountExceeded := c.isMaxDataDiskCountExceeded(ctx, node)
+	if isMaxDataDiskCountExceeded {
+		c.lockMap.LockEntry(node)
+		defer c.lockMap.UnlockEntry(node)
+	}
+
 	requestNum, err := c.insertAttachDiskRequest(diskuri, node, &options)
 	if err != nil {
 		return -1, err
 	}
-
-	c.lockMap.LockEntry(node)
-	unlock := false
-	defer func() {
-		if !unlock {
-			c.lockMap.UnlockEntry(node)
-		}
-	}()
+	if !isMaxDataDiskCountExceeded {
+		c.lockMap.LockEntry(node)
+		defer c.lockMap.UnlockEntry(node)
+	}
 
 	if c.AttachDetachInitialDelayInMs > 0 && requestNum == 1 {
 		klog.V(2).Infof("wait %dms for more requests on node %s, current disk attach: %s", c.AttachDetachInitialDelayInMs, node, diskURI)
@@ -211,7 +215,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 		return -1, err
 	}
 
-	lun, err := c.SetDiskLun(nodeName, diskuri, diskMap, occupiedLuns)
+	lun, err := c.SetDiskLun(ctx, nodeName, diskuri, diskMap, occupiedLuns)
 	if err != nil {
 		return -1, err
 	}
@@ -220,7 +224,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	if len(diskMap) == 0 {
 		if !c.DisableDiskLunCheck {
 			// always check disk lun after disk attach complete
-			diskLun, vmState, errGetLun := c.GetDiskLun(diskName, diskURI, nodeName)
+			diskLun, vmState, errGetLun := c.GetDiskLun(ctx, diskName, diskURI, nodeName)
 			if errGetLun != nil {
 				return -1, fmt.Errorf("disk(%s) could not be found on node(%s), vmState: %s, error: %w", diskURI, nodeName, ptr.Deref(vmState, ""), errGetLun)
 			}
@@ -245,6 +249,10 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 
 	err = vmset.AttachDisk(ctx, nodeName, diskMap)
 	if err != nil {
+		if strings.Contains(err.Error(), "maximum number of data disks") {
+			klog.Warningf("hit max data disk count, set cache for node(%s)", nodeName)
+			c.hitMaxDataDiskCountCache.Set(node, "")
+		}
 		if IsOperationPreempted(err) {
 			klog.Errorf("Retry VM Update on node (%s) due to error (%v)", nodeName, err)
 			err = vmset.UpdateVM(ctx, nodeName)
@@ -256,7 +264,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 
 	if !c.DisableDiskLunCheck {
 		// always check disk lun after disk attach complete
-		diskLun, vmState, errGetLun := c.GetDiskLun(diskName, diskURI, nodeName)
+		diskLun, vmState, errGetLun := c.GetDiskLun(ctx, diskName, diskURI, nodeName)
 		if errGetLun != nil {
 			return -1, fmt.Errorf("disk(%s) could not be found on node(%s), vmState: %s, error: %w", diskURI, nodeName, ptr.Deref(vmState, ""), errGetLun)
 		}
@@ -371,7 +379,7 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 
 	if !c.DisableDiskLunCheck {
 		// always check disk lun after disk detach complete
-		lun, vmState, errGetLun := c.GetDiskLun(diskName, diskURI, nodeName)
+		lun, vmState, errGetLun := c.GetDiskLun(ctx, diskName, diskURI, nodeName)
 		if errGetLun == nil || !strings.Contains(errGetLun.Error(), consts.CannotFindDiskLUN) {
 			return fmt.Errorf("disk(%s) is still attached to node(%s) on lun(%d), vmState: %s, error: %w", diskURI, nodeName, lun, ptr.Deref(vmState, ""), errGetLun)
 		}
@@ -445,20 +453,20 @@ func (c *controllerCommon) cleanDetachDiskRequests(nodeName string) (map[string]
 }
 
 // GetNodeDataDisks invokes vmSet interfaces to get data disks for the node.
-func (c *controllerCommon) GetNodeDataDisks(nodeName types.NodeName, crt azcache.AzureCacheReadType) ([]*armcompute.DataDisk, *string, error) {
-	vmset, err := c.cloud.GetNodeVMSet(context.Background(), nodeName, crt)
+func (c *controllerCommon) GetNodeDataDisks(ctx context.Context, nodeName types.NodeName, crt azcache.AzureCacheReadType) ([]*armcompute.DataDisk, *string, error) {
+	vmset, err := c.cloud.GetNodeVMSet(ctx, nodeName, crt)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return vmset.GetDataDisks(context.Background(), nodeName, crt)
+	return vmset.GetDataDisks(ctx, nodeName, crt)
 }
 
 // GetDiskLun finds the lun on the host that the vhd is attached to, given a vhd's diskName and diskURI.
-func (c *controllerCommon) GetDiskLun(diskName, diskURI string, nodeName types.NodeName) (int32, *string, error) {
+func (c *controllerCommon) GetDiskLun(ctx context.Context, diskName, diskURI string, nodeName types.NodeName) (int32, *string, error) {
 	// GetNodeDataDisks need to fetch the cached data/fresh data if cache expired here
 	// to ensure we get LUN based on latest entry.
-	disks, provisioningState, err := c.GetNodeDataDisks(nodeName, azcache.CacheReadTypeDefault)
+	disks, provisioningState, err := c.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %s: %v", nodeName, err)
 		return -1, provisioningState, err
@@ -483,8 +491,8 @@ func (c *controllerCommon) GetDiskLun(diskName, diskURI string, nodeName types.N
 // SetDiskLun find unused luns and allocate lun for every disk in diskMap.
 // occupiedLuns is used to avoid conflict with other disk attach in k8s VolumeAttachments
 // Return lun of diskURI, -1 if all luns are used.
-func (c *controllerCommon) SetDiskLun(nodeName types.NodeName, diskURI string, diskMap map[string]*provider.AttachDiskOptions, occupiedLuns []int) (int32, error) {
-	disks, _, err := c.GetNodeDataDisks(nodeName, azcache.CacheReadTypeDefault)
+func (c *controllerCommon) SetDiskLun(ctx context.Context, nodeName types.NodeName, diskURI string, diskMap map[string]*provider.AttachDiskOptions, occupiedLuns []int) (int32, error) {
+	disks, _, err := c.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %s: %v", nodeName, err)
 		return -1, err
@@ -553,68 +561,8 @@ func (c *controllerCommon) SetDiskLun(nodeName types.NodeName, diskURI string, d
 	return lun, nil
 }
 
-// DisksAreAttached checks if a list of volumes are attached to the node with the specified NodeName.
-func (c *controllerCommon) DisksAreAttached(diskNames []string, nodeName types.NodeName) (map[string]bool, error) {
-	attached := make(map[string]bool)
-	for _, diskName := range diskNames {
-		attached[diskName] = false
-	}
-
-	// doing stalled read for GetNodeDataDisks to ensure we don't call ARM
-	// for every reconcile call. The cache is invalidated after Attach/Detach
-	// disk. So the new entry will be fetched and cached the first time reconcile
-	// loop runs after the Attach/Disk OP which will reflect the latest model.
-	disks, _, err := c.GetNodeDataDisks(nodeName, azcache.CacheReadTypeUnsafe)
-	if err != nil {
-		if errors.Is(err, cloudprovider.InstanceNotFound) {
-			// if host doesn't exist, no need to detach
-			klog.Warningf("azureDisk - Cannot find node %s, DisksAreAttached will assume disks %v are not attached to it.",
-				nodeName, diskNames)
-			return attached, nil
-		}
-
-		return attached, err
-	}
-
-	for _, disk := range disks {
-		for _, diskName := range diskNames {
-			if disk.Name != nil && diskName != "" && strings.EqualFold(*disk.Name, diskName) {
-				attached[diskName] = true
-			}
-		}
-	}
-
-	return attached, nil
-}
-
-func (c *controllerCommon) filterNonExistingDisks(ctx context.Context, unfilteredDisks []*armcompute.DataDisk) []*armcompute.DataDisk {
-	filteredDisks := []*armcompute.DataDisk{}
-	for _, disk := range unfilteredDisks {
-		filter := false
-		if disk.ManagedDisk != nil && disk.ManagedDisk.ID != nil {
-			diskURI := *disk.ManagedDisk.ID
-			exist, err := c.checkDiskExists(ctx, diskURI)
-			if err != nil {
-				klog.Errorf("checkDiskExists(%s) failed with error: %v", diskURI, err)
-			} else {
-				// only filter disk when checkDiskExists returns <false, nil>
-				filter = !exist
-				if filter {
-					klog.Errorf("disk(%s) does not exist, removed from data disk list", diskURI)
-				}
-			}
-		}
-
-		if !filter {
-			filteredDisks = append(filteredDisks, disk)
-		}
-	}
-	return filteredDisks
-}
-
 func (c *controllerCommon) checkDiskExists(ctx context.Context, diskURI string) (bool, error) {
-	diskName := path.Base(diskURI)
-	resourceGroup, subsID, err := getInfoFromDiskURI(diskURI)
+	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
 	if err != nil {
 		return false, err
 	}
@@ -683,4 +631,13 @@ func isInstanceNotFoundError(err error) bool {
 		return true
 	}
 	return strings.Contains(errMsg, errStatusCode400) && strings.Contains(errMsg, errInvalidParameter) && strings.Contains(errMsg, errTargetInstanceIDs)
+}
+
+func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeName string) bool {
+	cache, err := c.hitMaxDataDiskCountCache.Get(ctx, nodeName, azcache.CacheReadTypeDefault)
+	if err != nil {
+		klog.Warningf("throttlingCache(%s) return with error: %s", nodeName, err)
+		return false
+	}
+	return cache != nil
 }

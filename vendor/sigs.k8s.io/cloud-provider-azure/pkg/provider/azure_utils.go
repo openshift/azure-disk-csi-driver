@@ -47,44 +47,6 @@ var strToExtendedLocationType = map[string]armnetwork.ExtendedLocationTypes{
 	"edgezone": armnetwork.ExtendedLocationTypesEdgeZone,
 }
 
-// LockMap used to lock on entries
-type LockMap struct {
-	sync.Mutex
-	mutexMap map[string]*sync.Mutex
-}
-
-// NewLockMap returns a new lock map
-func newLockMap() *LockMap {
-	return &LockMap{
-		mutexMap: make(map[string]*sync.Mutex),
-	}
-}
-
-// LockEntry acquires a lock associated with the specific entry
-func (lm *LockMap) LockEntry(entry string) {
-	lm.Lock()
-	// check if entry does not exists, then add entry
-	mutex, exists := lm.mutexMap[entry]
-	if !exists {
-		mutex = &sync.Mutex{}
-		lm.mutexMap[entry] = mutex
-	}
-	lm.Unlock()
-	mutex.Lock()
-}
-
-// UnlockEntry release the lock associated with the specific entry
-func (lm *LockMap) UnlockEntry(entry string) {
-	lm.Lock()
-	defer lm.Unlock()
-
-	mutex, exists := lm.mutexMap[entry]
-	if !exists {
-		return
-	}
-	mutex.Unlock()
-}
-
 func getContextWithCancel() (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
@@ -123,7 +85,13 @@ func parseTags(tags string, tagsMap map[string]string) map[string]*string {
 				klog.Warningf("parseTags: error when parsing key-value pair %s, would ignore this one", kv)
 				continue
 			}
+			// Avoid generate `Null` string after TrimSpace operation, (e.g. " null", " Null " -> "null"/"Null")
+			// `Null` is a reserved tag value by ARM, so the leading/trailing spaces must be preserved.
+			// Refer to https://github.com/kubernetes-sigs/cloud-provider-azure/issues/7048.
 			k, v := strings.TrimSpace(res[0]), strings.TrimSpace(res[1])
+			if strings.EqualFold(v, "null") {
+				v = res[1]
+			}
 			if k == "" {
 				klog.Warning("parseTags: empty key, ignoring this key-value pair")
 				continue
@@ -133,8 +101,11 @@ func parseTags(tags string, tagsMap map[string]string) map[string]*string {
 	}
 
 	if len(tagsMap) > 0 {
-		for key, value := range tagsMap {
-			key, value := strings.TrimSpace(key), strings.TrimSpace(value)
+		for k, v := range tagsMap {
+			key, value := strings.TrimSpace(k), strings.TrimSpace(v)
+			if strings.EqualFold(value, "null") {
+				value = v
+			}
 			if key == "" {
 				klog.Warningf("parseTags: empty key, ignoring this key-value pair")
 				continue
@@ -438,9 +409,12 @@ func getResourceByIPFamily(resource string, isDualStack, isIPv6 bool) string {
 
 // isFIPIPv6 checks if the frontend IP configuration is of IPv6.
 // NOTICE: isFIPIPv6 assumes the FIP is owned by the Service and it is the primary Service.
-func (az *Cloud) isFIPIPv6(service *v1.Service, _ string, fip *network.FrontendIPConfiguration) (bool, error) {
+func (az *Cloud) isFIPIPv6(service *v1.Service, fip *network.FrontendIPConfiguration) (bool, error) {
 	isDualStack := isServiceDualStack(service)
 	if !isDualStack {
+		if len(service.Spec.IPFamilies) == 0 {
+			return false, nil
+		}
 		return service.Spec.IPFamilies[0] == v1.IPv6Protocol, nil
 	}
 	return managedResourceHasIPv6Suffix(ptr.Deref(fip.Name, "")), nil
@@ -455,13 +429,13 @@ func getResourceIDPrefix(id string) string {
 	return id[:idx]
 }
 
-func getLBNameFromBackendPoolID(backendPoolID string) (string, error) {
+func getBackendPoolNameFromBackendPoolID(backendPoolID string) (string, error) {
 	matches := backendPoolIDRE.FindStringSubmatch(backendPoolID)
-	if len(matches) != 2 {
+	if len(matches) != 3 {
 		return "", fmt.Errorf("backendPoolID %q is in wrong format", backendPoolID)
 	}
 
-	return matches[1], nil
+	return matches[2], nil
 }
 
 func countNICsOnBackendPool(backendPool network.BackendAddressPool) int {
