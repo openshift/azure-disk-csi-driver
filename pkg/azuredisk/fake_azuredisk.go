@@ -88,7 +88,6 @@ type FakeDriver interface {
 
 	checkDiskCapacity(context.Context, string, string, string, int) (bool, error)
 	checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error)
-	getSnapshotInfo(string) (string, string, string, error)
 	waitForSnapshotReady(context.Context, string, string, string, time.Duration, time.Duration) error
 	getSnapshotByID(context.Context, string, string, string, string) (*csi.Snapshot, error)
 	ensureMountPoint(string) (bool, error)
@@ -96,7 +95,7 @@ type FakeDriver interface {
 	getDevicePathWithLUN(lunStr string) (string, error)
 	setThrottlingCache(key string, value string)
 	getUsedLunsFromVolumeAttachments(context.Context, string) ([]int, error)
-	getUsedLunsFromNode(nodeName types.NodeName) ([]int, error)
+	getUsedLunsFromNode(context.Context, types.NodeName) ([]int, error)
 }
 
 type fakeDriverV1 struct {
@@ -125,7 +124,7 @@ func newFakeDriverV1(ctrl *gomock.Controller) (*fakeDriverV1, error) {
 	driver.diskController = NewManagedDiskController(driver.cloud)
 	driver.clientFactory = driver.cloud.ComputeClientFactory
 
-	mounter, err := mounter.NewSafeMounter(true, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
+	mounter, err := mounter.NewSafeMounter(true, true, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
 	if err != nil {
 		return nil, err
 	}

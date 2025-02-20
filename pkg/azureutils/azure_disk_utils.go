@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -48,6 +47,7 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader"
 	azclients "sigs.k8s.io/cloud-provider-azure/pkg/azureclients"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
+	azureconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
 )
 
 const (
@@ -66,43 +66,28 @@ const (
 
 var (
 	// see https://docs.microsoft.com/en-us/rest/api/compute/disks/createorupdate#create-a-managed-disk-by-copying-a-snapshot.
-	diskSnapshotPath        = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/snapshots/%s"
-	diskSnapshotPathRE      = regexp.MustCompile(`(?i).*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/snapshots/(.+)`)
-	diskURISupportedManaged = []string{"/subscriptions/{sub-id}/resourcegroups/{group-name}/providers/microsoft.compute/disks/{disk-id}"}
-	lunPathRE               = regexp.MustCompile(`/dev(?:.*)/disk/azure/scsi(?:.*)/lun(.+)`)
-	supportedCachingModes   = sets.NewString(
+	diskSnapshotPath      = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/snapshots/%s"
+	diskSnapshotPathRE    = regexp.MustCompile(`(?i).*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/snapshots/(.+)`)
+	lunPathRE             = regexp.MustCompile(`/dev(?:.*)/disk/azure/scsi(?:.*)/lun(.+)`)
+	supportedCachingModes = sets.NewString(
 		string(api.AzureDataDiskCachingNone),
 		string(api.AzureDataDiskCachingReadOnly),
 		string(api.AzureDataDiskCachingReadWrite),
 	)
 
 	// volumeCaps represents how the volume could be accessed.
-	volumeCaps = []csi.VolumeCapability_AccessMode{
-		{
-			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER,
-		},
-		{
-			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
-		},
+	volumeCaps = []*csi.VolumeCapability_AccessMode{
+		{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+		{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY},
+		{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER},
+		{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER},
+		{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY},
+		{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER},
+		{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
 	}
 
-	// lock mutex for RunPowerShellCommand
-	mutex = &sync.Mutex{}
+	// control the number of concurrent powershell commands running on Windows node
+	powershellCmdSem = make(chan struct{}, 3)
 )
 
 type ManagedDiskParameters struct {
@@ -167,13 +152,13 @@ func GetAttachDiskInitialDelay(attributes map[string]string) int {
 // GetCloudProviderFromClient get Azure Cloud Provider
 func GetCloudProviderFromClient(ctx context.Context, kubeClient clientset.Interface, secretName, secretNamespace, userAgent string,
 	allowEmptyCloudConfig bool, enableTrafficMgr bool, trafficMgrPort int64) (*azure.Cloud, error) {
-	var config *azure.Config
+	var config *azureconfig.Config
 	var fromSecret bool
 	var err error
 	az := &azure.Cloud{}
 	if kubeClient != nil {
 		klog.V(2).Infof("reading cloud config from secret %s/%s", secretNamespace, secretName)
-		config, err = configloader.Load[azure.Config](ctx, &configloader.K8sSecretLoaderConfig{
+		config, err = configloader.Load[azureconfig.Config](ctx, &configloader.K8sSecretLoaderConfig{
 			K8sSecretConfig: configloader.K8sSecretConfig{
 				SecretName:      secretName,
 				SecretNamespace: secretNamespace,
@@ -203,7 +188,7 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient clientset.Interf
 			}
 			klog.V(2).Infof("use default %s env var: %v", consts.DefaultAzureCredentialFileEnv, credFile)
 		}
-		config, err = configloader.Load[azure.Config](ctx, nil, &configloader.FileLoaderConfig{FilePath: credFile})
+		config, err = configloader.Load[azureconfig.Config](ctx, nil, &configloader.FileLoaderConfig{FilePath: credFile})
 		if err != nil {
 			klog.Warningf("load azure config from file(%s) failed with %v", credFile, err)
 		}
@@ -293,14 +278,6 @@ func GetDiskLUN(deviceInfo string) (int32, error) {
 	return int32(lun), nil
 }
 
-func GetDiskName(diskURI string) (string, error) {
-	matches := consts.ManagedDiskPathRE.FindStringSubmatch(diskURI)
-	if len(matches) != 2 {
-		return "", fmt.Errorf("could not get disk name from %s, correct format: %s", diskURI, consts.ManagedDiskPathRE)
-	}
-	return matches[1], nil
-}
-
 // Disk name must begin with a letter or number, end with a letter, number or underscore,
 // and may contain only letters, numbers, underscores, periods, or hyphens.
 // See https://docs.microsoft.com/en-us/rest/api/compute/disks/createorupdate#uri-parameters
@@ -352,22 +329,16 @@ func GetMaxShares(attributes map[string]string) (int, error) {
 	return 1, nil // disk is not shared
 }
 
-func GetResourceGroupFromURI(diskURI string) (string, error) {
-	fields := strings.Split(diskURI, "/")
-	if len(fields) != 9 || strings.ToLower(fields[3]) != "resourcegroups" {
-		return "", fmt.Errorf("invalid disk URI: %s", diskURI)
-	}
-	return fields[4], nil
-}
-
-func GetSubscriptionIDFromURI(diskURI string) string {
+// GetInfoFromURI get subscriptionID, resourceGroup, diskName from diskURI
+// examples:
+// diskURI: /subscriptions/{subscription-id}/resourceGroups/{resource-group}/providers/Microsoft.Compute/disks/{disk-name}
+// snapshotURI: /subscriptions/{subscription-id}/resourceGroups/{resource-group}/providers/Microsoft.Compute/snapshots/{snapshot-name}
+func GetInfoFromURI(diskURI string) (string, string, string, error) {
 	parts := strings.Split(diskURI, "/")
-	for i, v := range parts {
-		if strings.EqualFold(v, "subscriptions") && (i+1) < len(parts) {
-			return parts[i+1]
-		}
+	if len(parts) != 9 {
+		return "", "", "", fmt.Errorf("invalid URI: %s", diskURI)
 	}
-	return ""
+	return parts[2], parts[4], parts[8], nil
 }
 
 func GetValidCreationData(subscriptionID, resourceGroup, sourceResourceID, sourceType string) (armcompute.CreationData, error) {
@@ -432,11 +403,13 @@ func IsValidAvailabilityZone(zone, region string) bool {
 	return strings.HasPrefix(zone, fmt.Sprintf("%s-", region))
 }
 
-func IsValidDiskURI(diskURI string) error {
-	if strings.Index(strings.ToLower(diskURI), "/subscriptions/") != 0 {
-		return fmt.Errorf("invalid DiskURI: %v, correct format: %v", diskURI, diskURISupportedManaged)
+// GetRegionFromAvailabilityZone returns region from availability zone if it's in format of <region>-<zone-id>
+func GetRegionFromAvailabilityZone(zone string) string {
+	parts := strings.Split(zone, "-")
+	if len(parts) == 2 {
+		return parts[0]
 	}
-	return nil
+	return ""
 }
 
 // IsValidVolumeCapabilities checks whether the volume capabilities are valid
@@ -836,9 +809,9 @@ func SetKeyValueInMap(m map[string]string, key, value string) {
 }
 
 func RunPowershellCmd(command string, envs ...string) ([]byte, error) {
-	// only one powershell command can be executed at a time to avoid OOM
-	mutex.Lock()
-	defer mutex.Unlock()
+	// acquire a semaphore to limit the number of concurrent operations
+	powershellCmdSem <- struct{}{}
+	defer func() { <-powershellCmdSem }()
 
 	cmd := exec.Command("powershell", "-Mta", "-NoProfile", "-Command", command)
 	cmd.Env = append(os.Environ(), envs...)
@@ -859,4 +832,15 @@ func GenerateVolumeName(clusterName, pvName string, maxLength int) string {
 		prefix = prefix[:maxLength-pvLen-1]
 	}
 	return prefix + "-" + pvName
+}
+
+// RemoveOptionIfExists removes the given option from the list of options
+// return the new list and a boolean indicating whether the option was found.
+func RemoveOptionIfExists(options []string, removeOption string) ([]string, bool) {
+	for i, option := range options {
+		if option == removeOption {
+			return append(options[:i], options[i+1:]...), true
+		}
+	}
+	return options, false
 }

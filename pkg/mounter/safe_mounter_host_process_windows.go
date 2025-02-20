@@ -40,15 +40,19 @@ import (
 
 var _ CSIProxyMounter = &winMounter{}
 
-type winMounter struct{}
+type winMounter struct {
+	listDisksUsingWinCIM bool
+}
 
-func NewWinMounter() *winMounter {
-	return &winMounter{}
+func NewWinMounter(listDisksUsingWinCIM bool) *winMounter {
+	return &winMounter{
+		listDisksUsingWinCIM: listDisksUsingWinCIM,
+	}
 }
 
 // Mount just creates a soft link at target pointing to source.
-func (mounter *winMounter) Mount(source, target, fstype string, options []string) error {
-	return filesystem.LinkPath(normalizeWindowsPath(source), normalizeWindowsPath(target))
+func (mounter *winMounter) Mount(source, target, _ string, _ []string) error {
+	return os.Symlink(normalizeWindowsPath(source), normalizeWindowsPath(target))
 }
 
 // Rmdir - delete the given directory
@@ -58,7 +62,14 @@ func (mounter *winMounter) Rmdir(path string) error {
 
 // Unmount - Removes the directory - equivalent to unmount on Linux.
 func (mounter *winMounter) Unmount(target string) error {
-	klog.V(4).Infof("Unmount: %s", target)
+	volumeID, err := mounter.GetDeviceNameFromMount(target, "")
+	if err != nil {
+		return err
+	}
+	klog.V(2).Infof("Unmounting volume %s from %s", volumeID, target)
+	if err = volume.UnmountVolume(volumeID, normalizeWindowsPath(target)); err != nil {
+		return err
+	}
 	return mounter.Rmdir(target)
 }
 
@@ -100,7 +111,7 @@ func (mounter *winMounter) IsLikelyNotMountPoint(path string) (bool, error) {
 // Currently the make dir is only used from the staging code path, hence we call it
 // with Plugin context..
 func (mounter *winMounter) MakeDir(path string) error {
-	return filesystem.Mkdir(normalizeWindowsPath(path))
+	return os.MkdirAll(normalizeWindowsPath(path), 0755)
 }
 
 // ExistsPath - Checks if a path exists. Unlike util ExistsPath, this call does not perform follow link.
@@ -206,7 +217,13 @@ func (mounter *winMounter) Rescan() error {
 
 // FindDiskByLun - given a lun number, find out the corresponding disk
 func (mounter *winMounter) FindDiskByLun(lun string) (diskNum string, err error) {
-	diskLocations, err := disk.ListDiskLocations()
+	var diskLocations map[uint32]disk.Location
+
+	if mounter.listDisksUsingWinCIM {
+		diskLocations, err = disk.ListDisksUsingCIM()
+	} else {
+		diskLocations, err = disk.ListDiskLocations()
+	}
 	if err != nil {
 		return "", err
 	}

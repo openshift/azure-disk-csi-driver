@@ -28,17 +28,6 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 )
 
-var (
-	// VolumeRegexp matches a Windows Volume
-	// example: Volume{452e318a-5cde-421e-9831-b9853c521012}
-	//
-	// The field UniqueId has an additional prefix which is NOT included in the regex
-	// however the regex can match UniqueId too
-	// PS C:\disks> (Get-Disk -Number 1 | Get-Partition | Get-Volume).UniqueId
-	// \\?\Volume{452e318a-5cde-421e-9831-b9853c521012}\
-	VolumeRegexp = regexp.MustCompile(`Volume\{[\w-]*\}`)
-)
-
 func getVolumeSize(volumeID string) (int64, error) {
 	cmd := "(Get-Volume -UniqueId \"$Env:volumeID\" | Get-partition).Size"
 	out, err := azureutils.RunPowershellCmd(cmd, fmt.Sprintf("volumeID=%s", volumeID))
@@ -122,21 +111,17 @@ func UnmountVolume(volumeID, path string) error {
 	cmd := "Get-Volume -UniqueId \"$Env:volumeID\" | Get-Partition | Remove-PartitionAccessPath -AccessPath $Env:path"
 	out, err := azureutils.RunPowershellCmd(cmd, fmt.Sprintf("volumeID=%s", volumeID), fmt.Sprintf("path=%s", path))
 	if err != nil {
-		return fmt.Errorf("error getting driver letter to mount volume. cmd: %s, output: %s,error: %v", cmd, string(out), err)
+		return fmt.Errorf("failed to mount volume. cmd: %s, output: %s,error: %v", cmd, string(out), err)
 	}
 	return nil
 }
 
 // ResizeVolume - resizes a volume with the given size, if size == 0 then max supported size is used
 func ResizeVolume(volumeID string, size int64) error {
-	// If size is 0 then we will resize to the maximum size possible, otherwise just resize to size
-	var cmd string
-	var out []byte
-	var err error
+	// if size is 0 then we will resize to the maximum size possible, otherwise just resize to size
 	var finalSize int64
-	var outString string
 	if size == 0 {
-		cmd = "Get-Volume -UniqueId \"$Env:volumeID\" | Get-partition | Get-PartitionSupportedSize | Select SizeMax | ConvertTo-Json"
+		cmd := "Get-Volume -UniqueId \"$Env:volumeID\" | Get-partition | Get-PartitionSupportedSize | Select SizeMax | ConvertTo-Json"
 		out, err := azureutils.RunPowershellCmd(cmd, fmt.Sprintf("volumeID=%s", volumeID))
 
 		if err != nil || len(out) == 0 {
@@ -144,15 +129,11 @@ func ResizeVolume(volumeID string, size int64) error {
 		}
 
 		var getVolumeSizing map[string]int64
-		outString = string(out)
-		err = json.Unmarshal([]byte(outString), &getVolumeSizing)
-		if err != nil {
+		outString := string(out)
+		if err = json.Unmarshal([]byte(outString), &getVolumeSizing); err != nil {
 			return fmt.Errorf("out %v outstring %v err %v", out, outString, err)
 		}
-
-		sizeMax := getVolumeSizing["SizeMax"]
-
-		finalSize = sizeMax
+		finalSize = getVolumeSizing["SizeMax"]
 	} else {
 		finalSize = size
 	}
@@ -162,14 +143,14 @@ func ResizeVolume(volumeID string, size int64) error {
 		return fmt.Errorf("error getting the current size of volume (%s) with error (%v)", volumeID, err)
 	}
 
-	//if the partition's size is already the size we want this is a noop, just return
-	if currentSize >= finalSize {
-		klog.V(2).Infof("Attempted to resize volume %s to a lower size, from currentBytes=%d wantedBytes=%d", volumeID, currentSize, finalSize)
+	// only resize if finalSize - currentSize is greater than 100MB
+	if finalSize-currentSize < 100*1024*1024 {
+		klog.V(2).Infof("minimum resize difference(1GB) not met, skipping resize. volumeID=%s currentSize=%d finalSize=%d", volumeID, currentSize, finalSize)
 		return nil
 	}
 
-	cmd = fmt.Sprintf("Get-Volume -UniqueId \"$Env:volumeID\" | Get-Partition | Resize-Partition -Size %d", finalSize)
-	out, err = azureutils.RunPowershellCmd(cmd, fmt.Sprintf("volumeID=%s", volumeID))
+	cmd := fmt.Sprintf("Get-Volume -UniqueId \"$Env:volumeID\" | Get-Partition | Resize-Partition -Size %d", finalSize)
+	out, err := azureutils.RunPowershellCmd(cmd, fmt.Sprintf("volumeID=%s", volumeID))
 	if err != nil {
 		return fmt.Errorf("error resizing volume. cmd: %s, output: %s size:%v, finalSize %v, error: %v", cmd, string(out), size, finalSize, err)
 	}
