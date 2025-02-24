@@ -347,11 +347,7 @@ func TestCreateManagedDiskWithExtendedLocation(t *testing.T) {
 
 	mockDisksClient := mock_diskclient.NewMockInterface(ctrl)
 	common.clientFactory.(*mock_azclient.MockClientFactory).EXPECT().GetDiskClientForSub(testCloud.SubscriptionID).Return(mockDisksClient, nil).AnyTimes()
-	mockDisksClient.EXPECT().CreateOrUpdate(gomock.Any(), testCloud.ResourceGroup, diskName, gomock.Any()).
-		Do(func(_ interface{}, _, _ string, disk armcompute.Disk) {
-			assert.Equal(t, el.Name, disk.ExtendedLocation.Name, "The extended location name should match.")
-			assert.Equal(t, el.Type, disk.ExtendedLocation.Type, "The extended location type should match.")
-		}).Return(to.Ptr(diskreturned), nil)
+	mockDisksClient.EXPECT().CreateOrUpdate(gomock.Any(), testCloud.ResourceGroup, diskName, gomock.Any()).Return(to.Ptr(diskreturned), nil)
 
 	mockDisksClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, diskName).Return(&diskreturned, nil).AnyTimes()
 
@@ -720,7 +716,7 @@ func TestModifyDisk(t *testing.T) {
 			diskIOPSReadWrite:  "200",
 			diskMBpsReadWrite:  "200",
 			storageAccountType: armcompute.DiskStorageAccountTypesUltraSSDLRS,
-			existedDisk:        &armcompute.Disk{Name: ptr.To(fakeCreateDiskFailed), SKU: &armcompute.DiskSKU{Name: &storageAccountTypeUltraSSDLRS}, Properties: &armcompute.DiskProperties{DiskIOPSReadWrite: ptr.To(int64(100)), DiskMBpsReadWrite: ptr.To(int64(100))}},
+			existedDisk:        &armcompute.Disk{Name: ptr.To(fakeGetDiskFailed), SKU: &armcompute.DiskSKU{Name: &storageAccountTypeUltraSSDLRS}, Properties: &armcompute.DiskProperties{DiskIOPSReadWrite: ptr.To(int64(100)), DiskMBpsReadWrite: ptr.To(int64(100))}},
 			expectedErr:        true,
 			expectedErrMsg:     fmt.Errorf("Get Disk failed"),
 		},

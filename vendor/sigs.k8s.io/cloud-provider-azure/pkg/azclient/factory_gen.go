@@ -23,10 +23,12 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/accountclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/availabilitysetclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/backendaddresspoolclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/blobcontainerclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/blobservicepropertiesclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/deploymentclient"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/loadbalancerclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/managedclusterclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/policy/ratelimit"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatednszonegroupclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/privateendpointclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatelinkserviceclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/privatezoneclient"
@@ -65,11 +68,13 @@ import (
 
 type ClientFactoryImpl struct {
 	armConfig                               *ARMClientConfig
-	facotryConfig                           *ClientFactoryConfig
+	cloudConfig                             cloud.Configuration
+	factoryConfig                           *ClientFactoryConfig
 	cred                                    azcore.TokenCredential
 	clientOptionsMutFn                      []func(option *arm.ClientOptions)
 	accountclientInterface                  sync.Map
 	availabilitysetclientInterface          availabilitysetclient.Interface
+	backendaddresspoolclientInterface       backendaddresspoolclient.Interface
 	blobcontainerclientInterface            sync.Map
 	blobservicepropertiesclientInterface    sync.Map
 	deploymentclientInterface               deploymentclient.Interface
@@ -81,6 +86,7 @@ type ClientFactoryImpl struct {
 	ipgroupclientInterface                  ipgroupclient.Interface
 	loadbalancerclientInterface             loadbalancerclient.Interface
 	managedclusterclientInterface           managedclusterclient.Interface
+	privatednszonegroupclientInterface      privatednszonegroupclient.Interface
 	privateendpointclientInterface          privateendpointclient.Interface
 	privatelinkserviceclientInterface       privatelinkserviceclient.Interface
 	privatezoneclientInterface              privatezoneclient.Interface
@@ -104,7 +110,7 @@ type ClientFactoryImpl struct {
 	virtualnetworklinkclientInterface       virtualnetworklinkclient.Interface
 }
 
-func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, cred azcore.TokenCredential, clientOptionsMutFn ...func(option *arm.ClientOptions)) (ClientFactory, error) {
+func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, cloud cloud.Configuration, cred azcore.TokenCredential, clientOptionsMutFn ...func(option *arm.ClientOptions)) (ClientFactory, error) {
 	if config == nil {
 		config = &ClientFactoryConfig{}
 	}
@@ -116,7 +122,8 @@ func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, c
 
 	factory := &ClientFactoryImpl{
 		armConfig:          armConfig,
-		facotryConfig:      config,
+		factoryConfig:      config,
+		cloudConfig:        cloud,
 		cred:               cred,
 		clientOptionsMutFn: clientOptionsMutFn,
 	}
@@ -129,6 +136,12 @@ func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, c
 
 	//initialize availabilitysetclient
 	factory.availabilitysetclientInterface, err = factory.createAvailabilitySetClient(config.SubscriptionID)
+	if err != nil {
+		return nil, err
+	}
+
+	//initialize backendaddresspoolclient
+	factory.backendaddresspoolclientInterface, err = factory.createBackendAddressPoolClient(config.SubscriptionID)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +208,12 @@ func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, c
 
 	//initialize managedclusterclient
 	factory.managedclusterclientInterface, err = factory.createManagedClusterClient(config.SubscriptionID)
+	if err != nil {
+		return nil, err
+	}
+
+	//initialize privatednszonegroupclient
+	factory.privatednszonegroupclientInterface, err = factory.createPrivateDNSZoneGroupClient(config.SubscriptionID)
 	if err != nil {
 		return nil, err
 	}
@@ -329,17 +348,18 @@ func NewClientFactory(config *ClientFactoryConfig, armConfig *ARMClientConfig, c
 
 func (factory *ClientFactoryImpl) createAccountClient(subscription string) (accountclient.Interface, error) {
 	//initialize accountclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = accountclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("storageAccountRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("storageAccountRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -353,12 +373,12 @@ func (factory *ClientFactoryImpl) createAccountClient(subscription string) (acco
 }
 
 func (factory *ClientFactoryImpl) GetAccountClient() accountclient.Interface {
-	clientImp, _ := factory.accountclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.accountclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(accountclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetAccountClientForSub(subscriptionID string) (accountclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.accountclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -375,17 +395,18 @@ func (factory *ClientFactoryImpl) GetAccountClientForSub(subscriptionID string) 
 
 func (factory *ClientFactoryImpl) createAvailabilitySetClient(subscription string) (availabilitysetclient.Interface, error) {
 	//initialize availabilitysetclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = availabilitysetclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("availabilitySetRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("availabilitySetRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -402,14 +423,41 @@ func (factory *ClientFactoryImpl) GetAvailabilitySetClient() availabilitysetclie
 	return factory.availabilitysetclientInterface
 }
 
-func (factory *ClientFactoryImpl) createBlobContainerClient(subscription string) (blobcontainerclient.Interface, error) {
-	//initialize blobcontainerclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+func (factory *ClientFactoryImpl) createBackendAddressPoolClient(subscription string) (backendaddresspoolclient.Interface, error) {
+	//initialize backendaddresspoolclient
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	//add ratelimit policy
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("loadBalancerRateLimit")
+	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
+	if rateLimitPolicy != nil {
+		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
+	}
+	for _, optionMutFn := range factory.clientOptionsMutFn {
+		if optionMutFn != nil {
+			optionMutFn(options)
+		}
+	}
+	return backendaddresspoolclient.New(subscription, factory.cred, options)
+}
+
+func (factory *ClientFactoryImpl) GetBackendAddressPoolClient() backendaddresspoolclient.Interface {
+	return factory.backendaddresspoolclientInterface
+}
+
+func (factory *ClientFactoryImpl) createBlobContainerClient(subscription string) (blobcontainerclient.Interface, error) {
+	//initialize blobcontainerclient
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
+	if err != nil {
+		return nil, err
+	}
+	options.Cloud = factory.cloudConfig
+
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = blobcontainerclient.AzureStackCloudAPIVersion
 	}
 
@@ -422,12 +470,12 @@ func (factory *ClientFactoryImpl) createBlobContainerClient(subscription string)
 }
 
 func (factory *ClientFactoryImpl) GetBlobContainerClient() blobcontainerclient.Interface {
-	clientImp, _ := factory.blobcontainerclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.blobcontainerclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(blobcontainerclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetBlobContainerClientForSub(subscriptionID string) (blobcontainerclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.blobcontainerclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -444,12 +492,13 @@ func (factory *ClientFactoryImpl) GetBlobContainerClientForSub(subscriptionID st
 
 func (factory *ClientFactoryImpl) createBlobServicePropertiesClient(subscription string) (blobservicepropertiesclient.Interface, error) {
 	//initialize blobservicepropertiesclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = blobservicepropertiesclient.AzureStackCloudAPIVersion
 	}
 
@@ -462,12 +511,12 @@ func (factory *ClientFactoryImpl) createBlobServicePropertiesClient(subscription
 }
 
 func (factory *ClientFactoryImpl) GetBlobServicePropertiesClient() blobservicepropertiesclient.Interface {
-	clientImp, _ := factory.blobservicepropertiesclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.blobservicepropertiesclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(blobservicepropertiesclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetBlobServicePropertiesClientForSub(subscriptionID string) (blobservicepropertiesclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.blobservicepropertiesclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -484,13 +533,14 @@ func (factory *ClientFactoryImpl) GetBlobServicePropertiesClientForSub(subscript
 
 func (factory *ClientFactoryImpl) createDeploymentClient(subscription string) (deploymentclient.Interface, error) {
 	//initialize deploymentclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("deploymentRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("deploymentRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -509,17 +559,18 @@ func (factory *ClientFactoryImpl) GetDeploymentClient() deploymentclient.Interfa
 
 func (factory *ClientFactoryImpl) createDiskClient(subscription string) (diskclient.Interface, error) {
 	//initialize diskclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = diskclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("diskRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("diskRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -533,12 +584,12 @@ func (factory *ClientFactoryImpl) createDiskClient(subscription string) (diskcli
 }
 
 func (factory *ClientFactoryImpl) GetDiskClient() diskclient.Interface {
-	clientImp, _ := factory.diskclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.diskclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(diskclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetDiskClientForSub(subscriptionID string) (diskclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.diskclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -555,10 +606,11 @@ func (factory *ClientFactoryImpl) GetDiskClientForSub(subscriptionID string) (di
 
 func (factory *ClientFactoryImpl) createFileServicePropertiesClient(subscription string) (fileservicepropertiesclient.Interface, error) {
 	//initialize fileservicepropertiesclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -569,12 +621,12 @@ func (factory *ClientFactoryImpl) createFileServicePropertiesClient(subscription
 }
 
 func (factory *ClientFactoryImpl) GetFileServicePropertiesClient() fileservicepropertiesclient.Interface {
-	clientImp, _ := factory.fileservicepropertiesclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.fileservicepropertiesclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(fileservicepropertiesclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetFileServicePropertiesClientForSub(subscriptionID string) (fileservicepropertiesclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.fileservicepropertiesclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -591,10 +643,11 @@ func (factory *ClientFactoryImpl) GetFileServicePropertiesClientForSub(subscript
 
 func (factory *ClientFactoryImpl) createFileShareClient(subscription string) (fileshareclient.Interface, error) {
 	//initialize fileshareclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -605,12 +658,12 @@ func (factory *ClientFactoryImpl) createFileShareClient(subscription string) (fi
 }
 
 func (factory *ClientFactoryImpl) GetFileShareClient() fileshareclient.Interface {
-	clientImp, _ := factory.fileshareclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.fileshareclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(fileshareclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetFileShareClientForSub(subscriptionID string) (fileshareclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.fileshareclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -627,10 +680,11 @@ func (factory *ClientFactoryImpl) GetFileShareClientForSub(subscriptionID string
 
 func (factory *ClientFactoryImpl) createIdentityClient(subscription string) (identityclient.Interface, error) {
 	//initialize identityclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -646,17 +700,18 @@ func (factory *ClientFactoryImpl) GetIdentityClient() identityclient.Interface {
 
 func (factory *ClientFactoryImpl) createInterfaceClient(subscription string) (interfaceclient.Interface, error) {
 	//initialize interfaceclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = interfaceclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("interfaceRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("interfaceRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -675,13 +730,14 @@ func (factory *ClientFactoryImpl) GetInterfaceClient() interfaceclient.Interface
 
 func (factory *ClientFactoryImpl) createIPGroupClient(subscription string) (ipgroupclient.Interface, error) {
 	//initialize ipgroupclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("ipGroupRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("ipGroupRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -700,17 +756,18 @@ func (factory *ClientFactoryImpl) GetIPGroupClient() ipgroupclient.Interface {
 
 func (factory *ClientFactoryImpl) createLoadBalancerClient(subscription string) (loadbalancerclient.Interface, error) {
 	//initialize loadbalancerclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = loadbalancerclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("loadBalancerRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("loadBalancerRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -729,13 +786,14 @@ func (factory *ClientFactoryImpl) GetLoadBalancerClient() loadbalancerclient.Int
 
 func (factory *ClientFactoryImpl) createManagedClusterClient(subscription string) (managedclusterclient.Interface, error) {
 	//initialize managedclusterclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("containerServiceRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("containerServiceRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -752,15 +810,36 @@ func (factory *ClientFactoryImpl) GetManagedClusterClient() managedclusterclient
 	return factory.managedclusterclientInterface
 }
 
-func (factory *ClientFactoryImpl) createPrivateEndpointClient(subscription string) (privateendpointclient.Interface, error) {
-	//initialize privateendpointclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+func (factory *ClientFactoryImpl) createPrivateDNSZoneGroupClient(subscription string) (privatednszonegroupclient.Interface, error) {
+	//initialize privatednszonegroupclient
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
+
+	for _, optionMutFn := range factory.clientOptionsMutFn {
+		if optionMutFn != nil {
+			optionMutFn(options)
+		}
+	}
+	return privatednszonegroupclient.New(subscription, factory.cred, options)
+}
+
+func (factory *ClientFactoryImpl) GetPrivateDNSZoneGroupClient() privatednszonegroupclient.Interface {
+	return factory.privatednszonegroupclientInterface
+}
+
+func (factory *ClientFactoryImpl) createPrivateEndpointClient(subscription string) (privateendpointclient.Interface, error) {
+	//initialize privateendpointclient
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
+	if err != nil {
+		return nil, err
+	}
+	options.Cloud = factory.cloudConfig
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("privateEndpointRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("privateEndpointRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -779,17 +858,18 @@ func (factory *ClientFactoryImpl) GetPrivateEndpointClient() privateendpointclie
 
 func (factory *ClientFactoryImpl) createPrivateLinkServiceClient(subscription string) (privatelinkserviceclient.Interface, error) {
 	//initialize privatelinkserviceclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = privatelinkserviceclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("privateLinkServiceRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("privateLinkServiceRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -808,17 +888,18 @@ func (factory *ClientFactoryImpl) GetPrivateLinkServiceClient() privatelinkservi
 
 func (factory *ClientFactoryImpl) createPrivateZoneClient(subscription string) (privatezoneclient.Interface, error) {
 	//initialize privatezoneclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = privatezoneclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("privateDNSRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("privateDNSRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -837,10 +918,11 @@ func (factory *ClientFactoryImpl) GetPrivateZoneClient() privatezoneclient.Inter
 
 func (factory *ClientFactoryImpl) createProviderClient(subscription string) (providerclient.Interface, error) {
 	//initialize providerclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -856,17 +938,18 @@ func (factory *ClientFactoryImpl) GetProviderClient() providerclient.Interface {
 
 func (factory *ClientFactoryImpl) createPublicIPAddressClient(subscription string) (publicipaddressclient.Interface, error) {
 	//initialize publicipaddressclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = publicipaddressclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("publicIPAddressRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("publicIPAddressRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -885,10 +968,11 @@ func (factory *ClientFactoryImpl) GetPublicIPAddressClient() publicipaddressclie
 
 func (factory *ClientFactoryImpl) createPublicIPPrefixClient(subscription string) (publicipprefixclient.Interface, error) {
 	//initialize publicipprefixclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -904,10 +988,11 @@ func (factory *ClientFactoryImpl) GetPublicIPPrefixClient() publicipprefixclient
 
 func (factory *ClientFactoryImpl) createRegistryClient(subscription string) (registryclient.Interface, error) {
 	//initialize registryclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -923,10 +1008,11 @@ func (factory *ClientFactoryImpl) GetRegistryClient() registryclient.Interface {
 
 func (factory *ClientFactoryImpl) createResourceGroupClient(subscription string) (resourcegroupclient.Interface, error) {
 	//initialize resourcegroupclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -942,10 +1028,11 @@ func (factory *ClientFactoryImpl) GetResourceGroupClient() resourcegroupclient.I
 
 func (factory *ClientFactoryImpl) createRoleAssignmentClient(subscription string) (roleassignmentclient.Interface, error) {
 	//initialize roleassignmentclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -961,17 +1048,18 @@ func (factory *ClientFactoryImpl) GetRoleAssignmentClient() roleassignmentclient
 
 func (factory *ClientFactoryImpl) createRouteTableClient(subscription string) (routetableclient.Interface, error) {
 	//initialize routetableclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = routetableclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("routeTableRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("routeTableRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -990,10 +1078,11 @@ func (factory *ClientFactoryImpl) GetRouteTableClient() routetableclient.Interfa
 
 func (factory *ClientFactoryImpl) createSecretClient(subscription string) (secretclient.Interface, error) {
 	//initialize secretclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -1009,17 +1098,18 @@ func (factory *ClientFactoryImpl) GetSecretClient() secretclient.Interface {
 
 func (factory *ClientFactoryImpl) createSecurityGroupClient(subscription string) (securitygroupclient.Interface, error) {
 	//initialize securitygroupclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = securitygroupclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("securityGroupRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("securityGroupRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -1038,17 +1128,18 @@ func (factory *ClientFactoryImpl) GetSecurityGroupClient() securitygroupclient.I
 
 func (factory *ClientFactoryImpl) createSnapshotClient(subscription string) (snapshotclient.Interface, error) {
 	//initialize snapshotclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = snapshotclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("snapshotRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("snapshotRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -1062,12 +1153,12 @@ func (factory *ClientFactoryImpl) createSnapshotClient(subscription string) (sna
 }
 
 func (factory *ClientFactoryImpl) GetSnapshotClient() snapshotclient.Interface {
-	clientImp, _ := factory.snapshotclientInterface.Load(strings.ToLower(factory.facotryConfig.SubscriptionID))
+	clientImp, _ := factory.snapshotclientInterface.Load(strings.ToLower(factory.factoryConfig.SubscriptionID))
 	return clientImp.(snapshotclient.Interface)
 }
 func (factory *ClientFactoryImpl) GetSnapshotClientForSub(subscriptionID string) (snapshotclient.Interface, error) {
 	if subscriptionID == "" {
-		subscriptionID = factory.facotryConfig.SubscriptionID
+		subscriptionID = factory.factoryConfig.SubscriptionID
 	}
 	clientImp, loaded := factory.snapshotclientInterface.Load(strings.ToLower(subscriptionID))
 	if loaded {
@@ -1084,10 +1175,11 @@ func (factory *ClientFactoryImpl) GetSnapshotClientForSub(subscriptionID string)
 
 func (factory *ClientFactoryImpl) createSSHPublicKeyResourceClient(subscription string) (sshpublickeyresourceclient.Interface, error) {
 	//initialize sshpublickeyresourceclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -1103,17 +1195,18 @@ func (factory *ClientFactoryImpl) GetSSHPublicKeyResourceClient() sshpublickeyre
 
 func (factory *ClientFactoryImpl) createSubnetClient(subscription string) (subnetclient.Interface, error) {
 	//initialize subnetclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = subnetclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("subnetsRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("subnetsRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -1132,10 +1225,11 @@ func (factory *ClientFactoryImpl) GetSubnetClient() subnetclient.Interface {
 
 func (factory *ClientFactoryImpl) createVaultClient(subscription string) (vaultclient.Interface, error) {
 	//initialize vaultclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -1151,17 +1245,18 @@ func (factory *ClientFactoryImpl) GetVaultClient() vaultclient.Interface {
 
 func (factory *ClientFactoryImpl) createVirtualMachineClient(subscription string) (virtualmachineclient.Interface, error) {
 	//initialize virtualmachineclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = virtualmachineclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("virtualMachineRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("virtualMachineRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -1180,17 +1275,18 @@ func (factory *ClientFactoryImpl) GetVirtualMachineClient() virtualmachineclient
 
 func (factory *ClientFactoryImpl) createVirtualMachineScaleSetClient(subscription string) (virtualmachinescalesetclient.Interface, error) {
 	//initialize virtualmachinescalesetclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = virtualmachinescalesetclient.AzureStackCloudAPIVersion
 	}
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("virtualMachineScaleSetRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("virtualMachineScaleSetRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)
@@ -1209,12 +1305,13 @@ func (factory *ClientFactoryImpl) GetVirtualMachineScaleSetClient() virtualmachi
 
 func (factory *ClientFactoryImpl) createVirtualMachineScaleSetVMClient(subscription string) (virtualmachinescalesetvmclient.Interface, error) {
 	//initialize virtualmachinescalesetvmclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
-	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) {
+	if factory.armConfig != nil && strings.EqualFold(factory.armConfig.Cloud, utils.AzureStackCloudName) && !factory.armConfig.DisableAzureStackCloud {
 		options.ClientOptions.APIVersion = virtualmachinescalesetvmclient.AzureStackCloudAPIVersion
 	}
 
@@ -1232,10 +1329,11 @@ func (factory *ClientFactoryImpl) GetVirtualMachineScaleSetVMClient() virtualmac
 
 func (factory *ClientFactoryImpl) createVirtualNetworkClient(subscription string) (virtualnetworkclient.Interface, error) {
 	//initialize virtualnetworkclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	for _, optionMutFn := range factory.clientOptionsMutFn {
 		if optionMutFn != nil {
@@ -1251,13 +1349,14 @@ func (factory *ClientFactoryImpl) GetVirtualNetworkClient() virtualnetworkclient
 
 func (factory *ClientFactoryImpl) createVirtualNetworkLinkClient(subscription string) (virtualnetworklinkclient.Interface, error) {
 	//initialize virtualnetworklinkclient
-	options, err := GetDefaultResourceClientOption(factory.armConfig, factory.facotryConfig)
+	options, err := GetDefaultResourceClientOption(factory.armConfig)
 	if err != nil {
 		return nil, err
 	}
+	options.Cloud = factory.cloudConfig
 
 	//add ratelimit policy
-	ratelimitOption := factory.facotryConfig.GetRateLimitConfig("virtualNetworkRateLimit")
+	ratelimitOption := factory.factoryConfig.GetRateLimitConfig("virtualNetworkRateLimit")
 	rateLimitPolicy := ratelimit.NewRateLimitPolicy(ratelimitOption)
 	if rateLimitPolicy != nil {
 		options.ClientOptions.PerCallPolicies = append(options.ClientOptions.PerCallPolicies, rateLimitPolicy)

@@ -51,8 +51,10 @@ type DriverOptions struct {
 	AttachDetachInitialDelayInMs int64
 	VMSSCacheTTLInSeconds        int64
 	VolStatsCacheExpireInMinutes int64
+	GetDiskTimeoutInSeconds      int64
 	VMType                       string
 	EnableWindowsHostProcess     bool
+	ListDisksUsingWinCIM         bool
 	GetNodeIDFromIMDS            bool
 	WaitForSnapshotReady         bool
 	CheckDiskLUNCollision        bool
@@ -63,6 +65,7 @@ type DriverOptions struct {
 	RemoveNotReadyTaint          bool
 	MaxConcurrentFormat          int64
 	ConcurrentFormatTimeout      int64
+	GoMaxProcs                   int64
 }
 
 func (o *DriverOptions) AddFlags() *flag.FlagSet {
@@ -95,8 +98,10 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.Int64Var(&o.AttachDetachInitialDelayInMs, "attach-detach-initial-delay-ms", 1000, "initial delay in milliseconds for batch disk attach/detach")
 	fs.Int64Var(&o.VMSSCacheTTLInSeconds, "vmss-cache-ttl-seconds", -1, "vmss cache TTL in seconds (600 by default)")
 	fs.Int64Var(&o.VolStatsCacheExpireInMinutes, "vol-stats-cache-expire-in-minutes", 10, "The cache expire time in minutes for volume stats cache")
+	fs.Int64Var(&o.GetDiskTimeoutInSeconds, "get-disk-timeout-seconds", 15, "The timeout in seconds for getting disk")
 	fs.StringVar(&o.VMType, "vm-type", "", "type of agent node. available values: vmss, standard")
 	fs.BoolVar(&o.EnableWindowsHostProcess, "enable-windows-host-process", false, "enable windows host process")
+	fs.BoolVar(&o.ListDisksUsingWinCIM, "list-disks-using-win-cim", true, "list disks using CIM API on Windows")
 	fs.BoolVar(&o.GetNodeIDFromIMDS, "get-nodeid-from-imds", false, "boolean flag to get NodeID from IMDS")
 	fs.BoolVar(&o.WaitForSnapshotReady, "wait-for-snapshot-ready", true, "boolean flag to wait for snapshot ready when creating snapshot in same region")
 	fs.BoolVar(&o.CheckDiskLUNCollision, "check-disk-lun-collision", true, "boolean flag to check disk lun collisio before attaching disk")
@@ -106,7 +111,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.BoolVar(&o.RemoveNotReadyTaint, "remove-not-ready-taint", true, "remove NotReady taint from node when node is ready")
 	fs.StringVar(&o.Endpoint, "endpoint", "unix://tmp/csi.sock", "CSI endpoint")
 	fs.Int64Var(&o.MaxConcurrentFormat, "max-concurrent-format", 2, "maximum number of concurrent format exec calls")
-	fs.Int64Var(&o.ConcurrentFormatTimeout, "concurrent-format-timeout", 120, "maximum time in seconds duration of a format operation before its concurrency token is released")
-
+	fs.Int64Var(&o.ConcurrentFormatTimeout, "concurrent-format-timeout", 300, "maximum time in seconds duration of a format operation before its concurrency token is released")
+	fs.Int64Var(&o.GoMaxProcs, "max-procs", 2, "maximum number of CPUs that can be executing simultaneously in golang runtime")
 	return fs
 }

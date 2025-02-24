@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,6 +45,7 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/diskclient/mock_diskclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/mock_azclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/vmclient/mockvmclient"
+	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/provider"
 	"sigs.k8s.io/cloud-provider-azure/pkg/retry"
@@ -91,6 +91,8 @@ func TestCommonAttachDisk(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	getter := func(_ context.Context, _ string) (interface{}, error) { return nil, nil }
+
 	initVM := func(testCloud *provider.Cloud, expectedVMs []compute.VirtualMachine) {
 		mockVMsClient := testCloud.VirtualMachinesClient.(*mockvmclient.MockInterface)
 		for _, vm := range expectedVMs {
@@ -115,21 +117,22 @@ func TestCommonAttachDisk(t *testing.T) {
 	testTags := make(map[string]*string)
 	testTags[WriteAcceleratorEnabled] = ptr.To("true")
 	testCases := []struct {
-		desc                 string
-		diskName             string
-		existedDisk          *armcompute.Disk
-		nodeName             types.NodeName
-		vmList               map[string]string
-		isDataDisksFull      bool
-		isBadDiskURI         bool
-		isDiskUsed           bool
-		setup                func(testCloud *provider.Cloud, expectedVMs []compute.VirtualMachine, statusCode int, result *retry.Error)
-		expectErr            bool
-		isContextDeadlineErr bool
-		statusCode           int
-		waitResult           *retry.Error
-		expectedLun          int32
-		contextDuration      time.Duration
+		desc                       string
+		diskName                   string
+		existedDisk                *armcompute.Disk
+		nodeName                   types.NodeName
+		vmList                     map[string]string
+		isDataDisksFull            bool
+		isBadDiskURI               bool
+		isDiskUsed                 bool
+		isMaxDataDiskCountExceeded bool
+		setup                      func(testCloud *provider.Cloud, expectedVMs []compute.VirtualMachine, statusCode int, result *retry.Error)
+		expectErr                  bool
+		isContextDeadlineErr       bool
+		statusCode                 int
+		waitResult                 *retry.Error
+		expectedLun                int32
+		contextDuration            time.Duration
 	}{
 		{
 			desc:        "correct LUN and no error shall be returned if disk is nil",
@@ -140,6 +143,17 @@ func TestCommonAttachDisk(t *testing.T) {
 			expectedLun: 3,
 			expectErr:   false,
 			statusCode:  200,
+		},
+		{
+			desc:                       "correct LUN and no error shall be returned if disk is nil with max data disk count exceeded",
+			vmList:                     map[string]string{"vm1": "PowerState/Running"},
+			nodeName:                   "vm1",
+			diskName:                   "disk-name",
+			isMaxDataDiskCountExceeded: true,
+			existedDisk:                nil,
+			expectedLun:                3,
+			expectErr:                  false,
+			statusCode:                 200,
 		},
 		{
 			desc:        "LUN -1 and error shall be returned if there's no such instance corresponding to given nodeName",
@@ -256,6 +270,10 @@ func TestCommonAttachDisk(t *testing.T) {
 				cloud:               testCloud,
 				lockMap:             newLockMap(),
 				DisableDiskLunCheck: true,
+			}
+			testdiskController.hitMaxDataDiskCountCache, _ = azcache.NewTimedCache(5*time.Minute, getter, false)
+			if tt.isMaxDataDiskCountExceeded {
+				testdiskController.hitMaxDataDiskCountCache.Set(string(tt.nodeName), "")
 			}
 			lun, err := testdiskController.AttachDisk(ctx, test.diskName, diskURI, tt.nodeName, armcompute.CachingTypesReadOnly, tt.existedDisk, nil)
 
@@ -440,7 +458,7 @@ func TestGetDiskLun(t *testing.T) {
 			mockVMsClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, *vm.Name, gomock.Any()).Return(vm, nil).AnyTimes()
 		}
 
-		lun, _, err := common.GetDiskLun(test.diskName, test.diskURI, "vm1")
+		lun, _, err := common.GetDiskLun(context.Background(), test.diskName, test.diskURI, "vm1")
 		assert.Equal(t, test.expectedLun, lun, "TestCase[%d]: %s", i, test.desc)
 		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d]: %s", i, test.desc)
 	}
@@ -509,185 +527,9 @@ func TestSetDiskLun(t *testing.T) {
 			mockVMsClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, *vm.Name, gomock.Any()).Return(vm, nil).AnyTimes()
 		}
 
-		lun, err := common.SetDiskLun(types.NodeName(test.nodeName), test.diskURI, test.diskMap, test.occupiedLuns)
+		lun, err := common.SetDiskLun(context.Background(), types.NodeName(test.nodeName), test.diskURI, test.diskMap, test.occupiedLuns)
 		assert.Equal(t, test.expectedLun, lun, "TestCase[%d]: %s", i, test.desc)
 		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d]: %s", i, test.desc)
-	}
-}
-
-func TestDisksAreAttached(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	testCases := []struct {
-		desc             string
-		diskNames        []string
-		nodeName         types.NodeName
-		expectedAttached map[string]bool
-		expectedErr      bool
-	}{
-		{
-			desc:             "an error shall be returned if there's no such instance corresponding to given nodeName",
-			diskNames:        []string{"disk1"},
-			nodeName:         "vm2",
-			expectedAttached: map[string]bool{"disk1": false},
-			expectedErr:      false,
-		},
-		{
-			desc:             "proper attach map shall be returned if everything is good",
-			diskNames:        []string{"disk1", "diskx"},
-			nodeName:         "vm1",
-			expectedAttached: map[string]bool{"disk1": true, "diskx": false},
-			expectedErr:      false,
-		},
-	}
-
-	for i, test := range testCases {
-		testCloud := provider.GetTestCloud(ctrl)
-		common := &controllerCommon{
-			cloud:   testCloud,
-			lockMap: newLockMap(),
-		}
-		expectedVMs := setTestVirtualMachines(testCloud, map[string]string{"vm1": "PowerState/Running"}, false)
-		mockVMsClient := testCloud.VirtualMachinesClient.(*mockvmclient.MockInterface)
-		for _, vm := range expectedVMs {
-			mockVMsClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, *vm.Name, gomock.Any()).Return(vm, nil).AnyTimes()
-		}
-		mockVMsClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, "vm2", gomock.Any()).Return(compute.VirtualMachine{}, &retry.Error{HTTPStatusCode: http.StatusNotFound, RawError: cloudprovider.InstanceNotFound}).AnyTimes()
-
-		attached, err := common.DisksAreAttached(test.diskNames, test.nodeName)
-		assert.Equal(t, test.expectedAttached, attached, "TestCase[%d]: %s", i, test.desc)
-		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d]: %s", i, test.desc)
-	}
-}
-
-func TestGetValidCreationData(t *testing.T) {
-	sourceResourceSnapshotID := "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx"
-	sourceResourceVolumeID := "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/disks/xxx"
-
-	tests := []struct {
-		subscriptionID   string
-		resourceGroup    string
-		sourceResourceID string
-		sourceType       string
-		expected1        armcompute.CreationData
-		expected2        error
-	}{
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "",
-			sourceType:       "",
-			expected1: armcompute.CreationData{
-				CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx",
-			sourceType:       sourceSnapshot,
-			expected1: armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceResourceSnapshotID,
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "xxx",
-			resourceGroup:    "xxx",
-			sourceResourceID: "xxx",
-			sourceType:       sourceSnapshot,
-			expected1: armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceResourceSnapshotID,
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/23/providers/Microsoft.Compute/disks/name",
-			sourceType:       sourceSnapshot,
-			expected1:        armcompute.CreationData{},
-			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots//subscriptions/23/providers/Microsoft.Compute/disks/name", diskSnapshotPathRE),
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "http://test.com/vhds/name",
-			sourceType:       sourceSnapshot,
-			expected1:        armcompute.CreationData{},
-			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots/http://test.com/vhds/name", diskSnapshotPathRE),
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/xxx/snapshots/xxx",
-			sourceType:       sourceSnapshot,
-			expected1:        armcompute.CreationData{},
-			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/snapshots//subscriptions/xxx/snapshots/xxx", diskSnapshotPathRE),
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx/snapshots/xxx/snapshots/xxx",
-			sourceType:       sourceSnapshot,
-			expected1:        armcompute.CreationData{},
-			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx/snapshots/xxx/snapshots/xxx", diskSnapshotPathRE),
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "xxx",
-			sourceType:       "",
-			expected1: armcompute.CreationData{
-				CreateOption: to.Ptr(armcompute.DiskCreateOptionEmpty),
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/disks/xxx",
-			sourceType:       sourceVolume,
-			expected1: armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceResourceVolumeID,
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "xxx",
-			resourceGroup:    "xxx",
-			sourceResourceID: "xxx",
-			sourceType:       sourceVolume,
-			expected1: armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceResourceVolumeID,
-			},
-			expected2: nil,
-		},
-		{
-			subscriptionID:   "",
-			resourceGroup:    "",
-			sourceResourceID: "/subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx",
-			sourceType:       sourceVolume,
-			expected1:        armcompute.CreationData{},
-			expected2:        fmt.Errorf("sourceResourceID(%s) is invalid, correct format: %s", "/subscriptions//resourceGroups//providers/Microsoft.Compute/disks//subscriptions/xxx/resourceGroups/xxx/providers/Microsoft.Compute/snapshots/xxx", managedDiskPathRE),
-		},
-	}
-
-	for _, test := range tests {
-		options := ManagedDiskOptions{
-			SourceResourceID: test.sourceResourceID,
-			SourceType:       test.sourceType,
-		}
-		result, err := getValidCreationData(test.subscriptionID, test.resourceGroup, &options)
-		if !reflect.DeepEqual(result, test.expected1) || !reflect.DeepEqual(err, test.expected2) {
-			t.Errorf("input sourceResourceID: %v, sourceType: %v, getValidCreationData result: %v, expected1 : %v, err: %v, expected2: %v", test.sourceResourceID, test.sourceType, result, test.expected1, err, test.expected2)
-		}
 	}
 }
 
@@ -748,50 +590,6 @@ func TestCheckDiskExists(t *testing.T) {
 		assert.Equal(t, test.expectedResult, exist, "TestCase[%d]", i, exist)
 		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d], return error: %v", i, err)
 	}
-}
-
-func TestFilterNonExistingDisksWithSpecialHTTPStatusCode(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	testCloud := provider.GetTestCloud(ctrl)
-	mockFactory := mock_azclient.NewMockClientFactory(ctrl)
-	common := &controllerCommon{
-		cloud:         testCloud,
-		clientFactory: mockFactory,
-		lockMap:       newLockMap(),
-	}
-	// create a new disk before running test
-	diskURIPrefix := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/disks/",
-		testCloud.SubscriptionID, testCloud.ResourceGroup)
-	newDiskName := "specialdisk"
-	newDiskURI := diskURIPrefix + newDiskName
-
-	mockDisksClient := mock_diskclient.NewMockInterface(ctrl)
-	mockFactory.EXPECT().GetDiskClientForSub(gomock.Any()).Return(mockDisksClient, nil).AnyTimes()
-	mockDisksClient.EXPECT().Get(gomock.Any(), testCloud.ResourceGroup, gomock.Eq(newDiskName)).Return(&armcompute.Disk{}, &azcore.ResponseError{
-		StatusCode: http.StatusBadRequest,
-		RawResponse: &http.Response{
-			StatusCode: http.StatusBadRequest,
-			Body:       ioutil.NopCloser(bytes.NewReader([]byte{})),
-		},
-	}).AnyTimes()
-
-	disks := []*armcompute.DataDisk{
-		{
-			Name: &newDiskName,
-			ManagedDisk: &armcompute.ManagedDiskParameters{
-				ID: &newDiskURI,
-			},
-		},
-	}
-
-	filteredDisks := common.filterNonExistingDisks(ctx, disks)
-	assert.Equal(t, 1, len(filteredDisks))
-	assert.Equal(t, newDiskName, *filteredDisks[0].Name)
 }
 
 func TestIsInstanceNotFoundError(t *testing.T) {
@@ -971,6 +769,50 @@ func TestDetachDiskRequestFuncs(t *testing.T) {
 			assert.Equal(t, strings.Contains(diskURI, test.diskURI), true, "TestCase[%d]: %s", i, test.desc)
 			assert.Equal(t, strings.Contains(diskName, test.diskName), true, "TestCase[%d]: %s", i, test.desc)
 		}
+	}
+}
+
+func TestIsMaxDataDiskCountExceeded(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	testCloud := provider.GetTestCloud(ctrl)
+	common := &controllerCommon{
+		cloud:   testCloud,
+		lockMap: newLockMap(),
+	}
+	getter := func(_ context.Context, _ string) (interface{}, error) { return nil, nil }
+	common.hitMaxDataDiskCountCache, _ = azcache.NewTimedCache(5*time.Minute, getter, false)
+
+	testCases := []struct {
+		desc           string
+		nodeName       string
+		expectedResult bool
+	}{
+		{
+			desc:           "max data disk count is not exceeded",
+			nodeName:       "",
+			expectedResult: false,
+		},
+		{
+			desc:           "max data disk count is not exceeded though another node has exceeded",
+			nodeName:       "node1",
+			expectedResult: false,
+		},
+		{
+			desc:           "max data disk count is exceeded",
+			nodeName:       "node1",
+			expectedResult: true,
+		},
+	}
+
+	for i, test := range testCases {
+		if test.expectedResult {
+			common.hitMaxDataDiskCountCache.Set(test.nodeName, "")
+		} else if test.nodeName != "" {
+			common.hitMaxDataDiskCountCache.Set("node2", "")
+		}
+		result := common.isMaxDataDiskCountExceeded(context.Background(), test.nodeName)
+		assert.Equal(t, test.expectedResult, result, "TestCase[%d]: %s", i, test.desc)
 	}
 }
 
