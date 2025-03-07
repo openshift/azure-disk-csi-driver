@@ -29,6 +29,8 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azuredisk"
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/azurediskplugin/hooks"
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 )
 
 func init() {
@@ -41,8 +43,14 @@ func init() {
 var (
 	version        = flag.Bool("version", false, "Print the version and exit.")
 	metricsAddress = flag.String("metrics-address", "", "export the metrics")
+	preStopHook    = flag.Bool("pre-stop-hook", false, "enable pre-stop hook")
 	driverOptions  azuredisk.DriverOptions
 )
+
+// exit is a separate function to handle program termination
+var exit = func(code int) {
+	os.Exit(code)
+}
 
 func main() {
 	flag.Parse()
@@ -52,12 +60,26 @@ func main() {
 			klog.Fatalln(err)
 		}
 		fmt.Println(info) // nolint
-		os.Exit(0)
+	} else if *preStopHook {
+		handlePreStopHook(driverOptions.Kubeconfig)
+	} else {
+		exportMetrics()
+		handle()
 	}
+	exit(0)
+}
 
-	exportMetrics()
-	handle()
-	os.Exit(0)
+func handlePreStopHook(kubeconfig string) {
+	kubeClient, err := azureutils.GetKubeClient(kubeconfig)
+	if err != nil {
+		klog.Errorf("failed to get kube client: %v", err)
+	} else {
+		if err := hooks.PreStop(kubeClient); err != nil {
+			klog.Errorf("execute PreStop lifecycle hook failed with error: %v", err)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+	}
+	klog.FlushAndExit(klog.ExitFlushTimeout, 0)
 }
 
 func handle() {

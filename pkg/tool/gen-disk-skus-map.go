@@ -43,10 +43,16 @@ var (
 	UncachedDiskBytesPerSecondCapability = "uncacheddiskbytespersecond"
 	MaxDataDiskCountCapability           = "maxdatadiskcount"
 	VCPUsCapability                      = "vcpus"
+	SkusFullfilePath                     = "skus-full.json"
 )
 
 func init() {
 	klog.InitFlags(nil)
+}
+
+// exit is a separate function to handle program termination
+var exit = func(code int) {
+	os.Exit(code)
 }
 
 func main() {
@@ -82,21 +88,20 @@ import (
 	nodeInfo := `	"%s": NodeInfo{SkuName: "%s", MaxDataDiskCount: %s, VCpus: %s, MaxBurstIops: %s, MaxIops: %s, MaxBwMbps: %s, MaxBurstBwMbps: %s},`
 	nodeMapEnd := "	}"
 
-	skusFullfilePath := "skus-full.json"
-	defer os.Remove(skusFullfilePath)
+	defer os.Remove(SkusFullfilePath)
 	skusFilePath := "pkg/azuredisk/azure_skus_map.go"
 
 	skuMap := map[string]bool{}
 
 	var resources []*armcompute.ResourceSKU
 
-	if err := getAllSkus(skusFullfilePath); err != nil {
+	if err := getAllSkus(); err != nil {
 		klog.Errorf("Could not get skus. Error: %v", err)
 	}
 
-	diskSkusFullJSON, err := os.Open(skusFullfilePath)
+	diskSkusFullJSON, err := os.Open(SkusFullfilePath)
 	if err != nil {
-		klog.Errorf("Could not read file. Error: %v, FilePath: %s", err, skusFullfilePath)
+		klog.Errorf("Could not read file. Error: %v, FilePath: %s", err, SkusFullfilePath)
 		return
 	}
 	defer diskSkusFullJSON.Close()
@@ -105,7 +110,7 @@ import (
 
 	err = json.Unmarshal([]byte(byteValue), &resources)
 	if err != nil {
-		klog.Errorf("Could not parse json file file. Error: %v, FilePath: %s", err, skusFullfilePath)
+		klog.Errorf("Could not parse json file file. Error: %v, FilePath: %s", err, SkusFullfilePath)
 		return
 	}
 
@@ -137,16 +142,15 @@ import (
 			diskSkuInfoMap[account][diskSize], err = getDiskCapabilities(sku)
 			if err != nil {
 				klog.Errorf("populateSkuMap: Failed to get disk capabilities for disk %s %s %s. Error: %v", *sku.Name, *sku.Size, *sku.Tier, err)
-				os.Exit(1)
+				exit(1)
 			}
 		} else if resType == "virtualmachines" {
-
 			nodeInfo := optimization.NodeInfo{}
 			nodeInfo.SkuName = *sku.Name
 			err = populateNodeCapabilities(sku, &nodeInfo)
 			if err != nil {
 				klog.Errorf("populateSkuMap: Failed to populate node capabilities. Error: %v", err)
-				os.Exit(1)
+				exit(1)
 			}
 			vmSkuInfoMap[strings.ToLower(*sku.Name)] = nodeInfo
 		}
@@ -210,13 +214,19 @@ func formatInt(value int) string {
 
 	return strconv.Itoa(value)
 }
-func getAllSkus(filePath string) (err error) {
-	klog.V(2).Infof("Getting skus and writing to %s", filePath)
+func getAllSkus() (err error) {
+	if os.Getenv("TEST_SCENARIO") == "true" {
+		if _, err := os.Stat("skus-sample.json"); err == nil {
+			SkusFullfilePath = "skus-sample.json"
+			return nil
+		}
+	}
+	klog.V(2).Infof("Getting skus and writing to %s", SkusFullfilePath)
 	cmd := exec.Command("az", "vm", "list-skus")
-	outfile, err := os.Create(filePath)
+	outfile, err := os.Create(SkusFullfilePath)
 	var errorBuf bytes.Buffer
 	if err != nil {
-		klog.Errorf("Could dnot create file. Error: %v File: %s", err, filePath)
+		klog.Errorf("Could not create file. Error: %v File: %s", err, SkusFullfilePath)
 		return err
 	}
 	defer outfile.Close()

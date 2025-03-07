@@ -29,7 +29,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 
 	"k8s.io/apimachinery/pkg/types"
 	kwait "k8s.io/apimachinery/pkg/util/wait"
@@ -183,7 +182,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	options := provider.AttachDiskOptions{
 		Lun:                     -1,
 		DiskName:                diskName,
-		CachingMode:             compute.CachingTypes(cachingMode),
+		CachingMode:             armcompute.CachingTypes(cachingMode),
 		DiskEncryptionSetID:     diskEncryptionSetID,
 		WriteAcceleratorEnabled: writeAcceleratorEnabled,
 	}
@@ -203,11 +202,11 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	if !isMaxDataDiskCountExceeded {
 		c.lockMap.LockEntry(node)
 		defer c.lockMap.UnlockEntry(node)
-	}
 
-	if c.AttachDetachInitialDelayInMs > 0 && requestNum == 1 {
-		klog.V(2).Infof("wait %dms for more requests on node %s, current disk attach: %s", c.AttachDetachInitialDelayInMs, node, diskURI)
-		time.Sleep(time.Duration(c.AttachDetachInitialDelayInMs) * time.Millisecond)
+		if c.AttachDetachInitialDelayInMs > 0 && requestNum == 1 {
+			klog.V(2).Infof("wait %dms for more requests on node %s, current disk attach: %s", c.AttachDetachInitialDelayInMs, node, diskURI)
+			time.Sleep(time.Duration(c.AttachDetachInitialDelayInMs) * time.Millisecond)
+		}
 	}
 
 	diskMap, err := c.cleanAttachDiskRequests(node)

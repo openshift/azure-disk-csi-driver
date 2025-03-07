@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -45,7 +44,6 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader"
-	azclients "sigs.k8s.io/cloud-provider-azure/pkg/azureclients"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 	azureconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
 )
@@ -85,9 +83,6 @@ var (
 		{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER},
 		{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
 	}
-
-	// control the number of concurrent powershell commands running on Windows node
-	powershellCmdSem = make(chan struct{}, 3)
 )
 
 type ManagedDiskParameters struct {
@@ -207,12 +202,14 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient clientset.Interf
 		config.Location = strings.ToLower(strings.ReplaceAll(config.Location, " ", ""))
 
 		// disable disk related rate limit
-		config.DiskRateLimit = &azclients.RateLimitConfig{
+		/* todo: reconfigure rate limit
+		config.DiskRateLimit = &ratelimit.CloudProviderRateLimitConfig{
 			CloudProviderRateLimit: false,
 		}
-		config.SnapshotRateLimit = &azclients.RateLimitConfig{
+		config.SnapshotRateLimit = &ratelimit.CloudProviderRateLimitConfig{
 			CloudProviderRateLimit: false,
 		}
+		*/
 		config.UserAgent = userAgent
 		if enableTrafficMgr && trafficMgrPort > 0 {
 			trafficMgrAddr := fmt.Sprintf("http://localhost:%d/", trafficMgrPort)
@@ -806,17 +803,6 @@ func SetKeyValueInMap(m map[string]string, key, value string) {
 		}
 	}
 	m[key] = value
-}
-
-func RunPowershellCmd(command string, envs ...string) ([]byte, error) {
-	// acquire a semaphore to limit the number of concurrent operations
-	powershellCmdSem <- struct{}{}
-	defer func() { <-powershellCmdSem }()
-
-	cmd := exec.Command("powershell", "-Mta", "-NoProfile", "-Command", command)
-	cmd.Env = append(os.Environ(), envs...)
-	klog.V(6).Infof("Executing command: %q", cmd.String())
-	return cmd.CombinedOutput()
 }
 
 // GenerateVolumeName returns a PV name with clusterName prefix. The function
