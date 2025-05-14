@@ -145,5 +145,5 @@ replace (
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.24.0-alpha.4
 	k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.24.0-alpha.4
 	k8s.io/sample-controller => k8s.io/sample-controller v0.24.0-alpha.4
-	sigs.k8s.io/cloud-provider-azure => sigs.k8s.io/cloud-provider-azure v0.7.4-0.20220721071156-49e3ba00fb91
+	sigs.k8s.io/cloud-provider-azure => github.com/openshift/cloud-provider-azure v0.7.5-0.20250513175341-97553af8a82b // release-4.12-azure-disk-csi-driver
 )
