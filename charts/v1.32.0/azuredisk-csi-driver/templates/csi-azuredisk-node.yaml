@@ -70,7 +70,7 @@ spec:
 {{- end }}
           args:
             - --csi-address=/csi/csi.sock
-            - --probe-timeout=3s
+            - --probe-timeout=10s
 {{- if eq .Values.node.hostNetwork true }}
             - --http-endpoint=localhost:{{ .Values.node.livenessProbe.healthPort }}
 {{- else }}
@@ -147,7 +147,7 @@ spec:
               port: healthz
 {{- end }}
             initialDelaySeconds: 30
-            timeoutSeconds: 10
+            timeoutSeconds: 30
             periodSeconds: 30
           env:
             - name: AZURE_CREDENTIAL_FILE
@@ -211,15 +211,12 @@ spec:
               name: sys-devices-dir
             - mountPath: /sys/class/
               name: sys-class
-            {{- if and (eq .Values.cloud "AzureStackCloud") (ne .Values.linux.distro "fedora") }}
+            {{- if or (eq .Values.cloud "AzureStackCloud") (eq .Values.linux.distro "fedora") }}
             - name: ssl
               mountPath: /etc/ssl/certs
               readOnly: true
             {{- end }}
             {{- if eq .Values.linux.distro "fedora" }}
-            - name: ssl
-              mountPath: /etc/ssl/certs
-              readOnly: true
             - name: ssl-pki
               mountPath: /etc/pki/ca-trust/extracted
               readOnly: true
@@ -254,15 +251,12 @@ spec:
             path: /sys/class/
             type: Directory
           name: sys-class
-        {{- if and (eq .Values.cloud "AzureStackCloud") (ne .Values.linux.distro "fedora") }}
+        {{- if or (eq .Values.cloud "AzureStackCloud") (eq .Values.linux.distro "fedora") }}
         - name: ssl
           hostPath:
             path: /etc/ssl/certs
         {{- end }}
         {{- if eq .Values.linux.distro "fedora" }}
-        - name: ssl
-          hostPath:
-            path: /etc/ssl/certs
         - name: ssl-pki
           hostPath:
             path: /etc/pki/ca-trust/extracted

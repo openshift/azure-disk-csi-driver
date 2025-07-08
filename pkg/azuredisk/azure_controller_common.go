@@ -20,17 +20,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	kwait "k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
 	volerr "k8s.io/cloud-provider/volume/errors"
@@ -38,6 +38,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
@@ -73,7 +74,7 @@ const (
 )
 
 var defaultBackOff = kwait.Backoff{
-	Steps:    20,
+	Steps:    7,
 	Duration: 2 * time.Second,
 	Factor:   1.5,
 	Jitter:   0.0,
@@ -93,13 +94,13 @@ type controllerCommon struct {
 	// <nodeName, map<diskURI, *provider.AttachDiskOptions/DetachDiskOptions>>
 	attachDiskMap sync.Map
 	detachDiskMap sync.Map
-	// DisableUpdateCache whether disable update cache in disk attach/detach
-	DisableUpdateCache bool
 	// DisableDiskLunCheck whether disable disk lun check after disk attach/detach
 	DisableDiskLunCheck bool
 	// AttachDetachInitialDelayInMs determines initial delay in milliseconds for batch disk attach/detach
 	AttachDetachInitialDelayInMs int
 	ForceDetachBackoff           bool
+	WaitForDetach                bool
+	CheckDiskCountForBatching    bool
 	// a timed cache for disk attach hitting max data disk count, <nodeName, "">
 	hitMaxDataDiskCountCache azcache.Resource
 }
@@ -128,6 +129,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 			if err != nil {
 				return -1, err
 			}
+			klog.V(4).Infof("found disk(%s) is already attached to node %s", diskURI, *disk.ManagedBy)
 			attachedNode, err := vmset.GetNodeNameByProviderID(ctx, *disk.ManagedBy)
 			if err != nil {
 				return -1, err
@@ -188,30 +190,79 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	}
 	node := strings.ToLower(string(nodeName))
 	diskuri := strings.ToLower(diskURI)
-
-	isMaxDataDiskCountExceeded := c.isMaxDataDiskCountExceeded(ctx, node)
-	if isMaxDataDiskCountExceeded {
-		c.lockMap.LockEntry(node)
-		defer c.lockMap.UnlockEntry(node)
-	}
-
 	requestNum, err := c.insertAttachDiskRequest(diskuri, node, &options)
 	if err != nil {
 		return -1, err
 	}
-	if !isMaxDataDiskCountExceeded {
-		c.lockMap.LockEntry(node)
-		defer c.lockMap.UnlockEntry(node)
 
-		if c.AttachDetachInitialDelayInMs > 0 && requestNum == 1 {
-			klog.V(2).Infof("wait %dms for more requests on node %s, current disk attach: %s", c.AttachDetachInitialDelayInMs, node, diskURI)
-			time.Sleep(time.Duration(c.AttachDetachInitialDelayInMs) * time.Millisecond)
+	var waitForDetachHappened bool
+	if c.WaitForDetach && c.isMaxDataDiskCountExceeded(ctx, string(nodeName)) {
+		// wait for disk detach to finish first on the same node
+		if err = wait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
+			detachDiskReqeustNum, err := c.getDetachDiskRequestNum(node)
+			if err != nil {
+				return false, err
+			}
+			if detachDiskReqeustNum == 0 {
+				return true, nil
+			}
+			klog.V(4).Infof("there are still %d detach disk requests on node %s, wait for detach to finish, current disk: %s", detachDiskReqeustNum, node, diskName)
+			waitForDetachHappened = true
+			return false, nil
+		}); err != nil {
+			klog.Errorf("current disk: %s, wait for detach disk requests on node %s failed: %v", diskName, node, err)
+		}
+	}
+
+	c.lockMap.LockEntry(node)
+	defer c.lockMap.UnlockEntry(node)
+
+	if !waitForDetachHappened && c.AttachDetachInitialDelayInMs > 0 && requestNum == 1 {
+		klog.V(2).Infof("wait %dms for more requests on node %s, current disk attach: %s", c.AttachDetachInitialDelayInMs, node, diskURI)
+		time.Sleep(time.Duration(c.AttachDetachInitialDelayInMs) * time.Millisecond)
+	}
+
+	numDisksAllowed := math.MaxInt
+	if c.CheckDiskCountForBatching {
+		_, instanceType, err := getNodeInfoFromLabels(ctx, string(nodeName), c.cloud.KubeClient)
+		if err != nil {
+			klog.Errorf("failed to get node info from labels: %v", err)
+		} else if instanceType != "" {
+			maxNumDisks, instanceExists := getMaxDataDiskCount(instanceType)
+			if instanceExists {
+				attachedDisks, _, err := c.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
+				if err != nil {
+					return -1, err
+				}
+				numDisksAttached := len(attachedDisks)
+				if int(maxNumDisks) > numDisksAttached {
+					numDisksAllowed = int(maxNumDisks) - numDisksAttached
+				} else {
+					numDisksAllowed = 0
+				}
+			}
 		}
 	}
 
 	diskMap, err := c.cleanAttachDiskRequests(node)
 	if err != nil {
 		return -1, err
+	}
+
+	// Remove some disks from the batch if the number is more than the max number of disks allowed
+	removeDisks := len(diskMap) - numDisksAllowed
+	if removeDisks > 0 {
+		klog.V(2).Infof("too many disks to attach, remove %d disks from the request", removeDisks)
+		for diskURI, options := range diskMap {
+			if removeDisks == 0 {
+				break
+			}
+			if options != nil {
+				klog.V(2).Infof("remove disk(%s) from attach request from node(%s)", diskURI, nodeName)
+				delete(diskMap, diskURI)
+			}
+			removeDisks--
+		}
 	}
 
 	lun, err := c.SetDiskLun(ctx, nodeName, diskuri, diskMap, occupiedLuns)
@@ -248,11 +299,11 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 
 	err = vmset.AttachDisk(ctx, nodeName, diskMap)
 	if err != nil {
-		if strings.Contains(err.Error(), "maximum number of data disks") {
-			klog.Warningf("hit max data disk count, set cache for node(%s)", nodeName)
+		if strings.Contains(err.Error(), util.MaximumDataDiskExceededMsg) {
+			klog.Warningf("hit max data disk count when attaching disk %s, set cache for node(%s)", diskName, nodeName)
 			c.hitMaxDataDiskCountCache.Set(node, "")
 		}
-		if IsOperationPreempted(err) {
+		if strings.Contains(err.Error(), "OperationPreempted") {
 			klog.Errorf("Retry VM Update on node (%s) due to error (%v)", nodeName, err)
 			err = vmset.UpdateVM(ctx, nodeName)
 		}
@@ -451,6 +502,20 @@ func (c *controllerCommon) cleanDetachDiskRequests(nodeName string) (map[string]
 	return diskMap, nil
 }
 
+func (c *controllerCommon) getDetachDiskRequestNum(nodeName string) (int, error) {
+	detachDiskMapKey := nodeName + detachDiskMapKeySuffix
+	c.lockMap.LockEntry(detachDiskMapKey)
+	defer c.lockMap.UnlockEntry(detachDiskMapKey)
+	v, ok := c.detachDiskMap.Load(nodeName)
+	if !ok {
+		return 0, nil
+	}
+	if diskMap, ok := v.(map[string]string); ok {
+		return len(diskMap), nil
+	}
+	return -1, fmt.Errorf("convert detachDiskMap failure on node(%s)", nodeName)
+}
+
 // GetNodeDataDisks invokes vmSet interfaces to get data disks for the node.
 func (c *controllerCommon) GetNodeDataDisks(ctx context.Context, nodeName types.NodeName, crt azcache.AzureCacheReadType) ([]*armcompute.DataDisk, *string, error) {
 	vmset, err := c.cloud.GetNodeVMSet(ctx, nodeName, crt)
@@ -560,28 +625,14 @@ func (c *controllerCommon) SetDiskLun(ctx context.Context, nodeName types.NodeNa
 	return lun, nil
 }
 
-func (c *controllerCommon) checkDiskExists(ctx context.Context, diskURI string) (bool, error) {
-	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
+// isMaxDataDiskCountExceeded checks if the max data disk count is exceeded
+func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeName string) bool {
+	_, err := c.hitMaxDataDiskCountCache.Get(ctx, nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
-		return false, err
+		klog.Warningf("isMaxDataDiskCountExceeded(%s) return with error: %s", nodeName, err)
+		return false
 	}
-
-	diskClient, err := c.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return false, err
-	}
-	if _, err := diskClient.Get(ctx, resourceGroup, diskName); err != nil {
-		var respErr = &azcore.ResponseError{}
-		if errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-func IsOperationPreempted(err error) bool {
-	return strings.Contains(err.Error(), "OperationPreempted")
+	return true
 }
 
 func getValidCreationData(subscriptionID, resourceGroup string, options *ManagedDiskOptions) (armcompute.CreationData, error) {
@@ -630,13 +681,4 @@ func isInstanceNotFoundError(err error) bool {
 		return true
 	}
 	return strings.Contains(errMsg, errStatusCode400) && strings.Contains(errMsg, errInvalidParameter) && strings.Contains(errMsg, errTargetInstanceIDs)
-}
-
-func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeName string) bool {
-	cache, err := c.hitMaxDataDiskCountCache.Get(ctx, nodeName, azcache.CacheReadTypeDefault)
-	if err != nil {
-		klog.Warningf("throttlingCache(%s) return with error: %s", nodeName, err)
-		return false
-	}
-	return cache != nil
 }

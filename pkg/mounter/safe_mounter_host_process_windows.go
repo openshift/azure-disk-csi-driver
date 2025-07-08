@@ -41,12 +41,23 @@ import (
 var _ CSIProxyMounter = &winMounter{}
 
 type winMounter struct {
-	listDisksUsingWinCIM bool
+	volAPI  volume.VolumeAPI
+	diskAPI disk.DiskAPI
 }
 
-func NewWinMounter(listDisksUsingWinCIM bool) *winMounter {
+func NewWinMounter(useWinCIMAPI bool) *winMounter {
+	var volAPI volume.VolumeAPI
+	var diskAPI disk.DiskAPI
+	if useWinCIMAPI {
+		volAPI = volume.NewCIMVolumeAPI()
+		diskAPI = disk.NewCIMDiskAPI()
+	} else {
+		volAPI = volume.NewPowerShellVolumeAPI()
+		diskAPI = disk.NewPowerShellDiskAPI()
+	}
 	return &winMounter{
-		listDisksUsingWinCIM: listDisksUsingWinCIM,
+		volAPI:  volAPI,
+		diskAPI: diskAPI,
 	}
 }
 
@@ -67,7 +78,7 @@ func (mounter *winMounter) Unmount(target string) error {
 		return err
 	}
 	klog.V(2).Infof("Unmounting volume %s from %s", volumeID, target)
-	if err = volume.UnmountVolume(volumeID, normalizeWindowsPath(target)); err != nil {
+	if err = mounter.volAPI.UnmountVolume(volumeID, normalizeWindowsPath(target)); err != nil {
 		return err
 	}
 	return mounter.Rmdir(target)
@@ -168,18 +179,18 @@ func (mounter *winMounter) FormatAndMount(source, target, fstype string, options
 	}
 
 	// set disk as online and clear readonly flag if there is any.
-	if err := disk.SetDiskState(uint32(diskNum), true); err != nil {
+	if err := mounter.diskAPI.SetDiskState(uint32(diskNum), true); err != nil {
 		// only log the error since SetDiskState is only needed in cloned volume
 		klog.Errorf("SetDiskState on disk(%d) failed with %v", diskNum, err)
 	}
 
 	// Call PartitionDisk CSI proxy call to partition the disk and return the volume id
-	if err := disk.PartitionDisk(uint32(diskNum)); err != nil {
+	if err := mounter.diskAPI.PartitionDisk(uint32(diskNum)); err != nil {
 		return err
 	}
 
 	// List the volumes on the given disk.
-	volumeIds, err := volume.ListVolumesOnDisk(uint32(diskNum), 0)
+	volumeIds, err := mounter.volAPI.ListVolumesOnDisk(uint32(diskNum), 0)
 	if err != nil {
 		return err
 	}
@@ -193,37 +204,44 @@ func (mounter *winMounter) FormatAndMount(source, target, fstype string, options
 	volumeID := volumeIds[0]
 
 	// Check if the volume is formatted.
-	formatted, err := volume.IsVolumeFormatted(volumeID)
+	formatted, err := mounter.volAPI.IsVolumeFormatted(volumeID)
 	if err != nil {
 		return err
 	}
 
 	// If the volume is not formatted, then format it, else proceed to mount.
 	if !formatted {
-		if err := volume.FormatVolume(volumeID); err != nil {
+		if err := mounter.volAPI.FormatVolume(volumeID); err != nil {
 			return err
 		}
 	}
 
 	// Mount the volume by calling the CSI proxy call.
-	return volume.MountVolume(volumeID, normalizeWindowsPath(target))
+	return mounter.volAPI.MountVolume(volumeID, normalizeWindowsPath(target))
 }
 
 // Rescan would trigger an update storage cache via the CSI proxy.
 func (mounter *winMounter) Rescan() error {
 	// Call Rescan from disk APIs of CSI Proxy.
-	return disk.Rescan()
+	return mounter.diskAPI.Rescan()
 }
 
 // FindDiskByLun - given a lun number, find out the corresponding disk
 func (mounter *winMounter) FindDiskByLun(lun string) (diskNum string, err error) {
-	var diskLocations map[uint32]disk.Location
-
-	if mounter.listDisksUsingWinCIM {
-		diskLocations, err = disk.ListDisksUsingCIM()
-	} else {
-		diskLocations, err = disk.ListDiskLocations()
+	diskLocations, err := mounter.diskAPI.ListDiskLocations()
+	if err != nil {
+		return "", err
 	}
+	// List all disk locations and match the lun id being requested for.
+	// If match is found then return back the disk number.
+	for diskID, location := range diskLocations {
+		if strings.EqualFold(location.LUNID, lun) {
+			return strconv.Itoa(int(diskID)), nil
+		}
+	}
+
+	klog.Warningf("ListDiskLocations failed to find lun %s, falling back to ListDisksUsingCIM", lun)
+	diskLocations, err = disk.ListDisksUsingCIM()
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +258,7 @@ func (mounter *winMounter) FindDiskByLun(lun string) (diskNum string, err error)
 
 // GetDeviceNameFromMount returns the volume ID for a mount path.
 func (mounter *winMounter) GetDeviceNameFromMount(mountPath, pluginMountDir string) (string, error) {
-	return volume.GetVolumeIDFromTargetPath(normalizeWindowsPath(mountPath))
+	return mounter.volAPI.GetVolumeIDFromTargetPath(normalizeWindowsPath(mountPath))
 }
 
 // GetVolumeSizeInBytes returns the size of the volume in bytes.
@@ -257,7 +275,7 @@ func (mounter *winMounter) ResizeVolume(source string) error {
 	diskNum, err := strconv.Atoi(source)
 	if err == nil {
 		// List the volumes on the given disk.
-		volumeIds, err := volume.ListVolumesOnDisk(uint32(diskNum), 0)
+		volumeIds, err := mounter.volAPI.ListVolumesOnDisk(uint32(diskNum), 0)
 		if err != nil {
 			return err
 		}
@@ -273,7 +291,7 @@ func (mounter *winMounter) ResizeVolume(source string) error {
 		volumeID = source
 	}
 
-	return volume.ResizeVolume(volumeID, 0)
+	return mounter.volAPI.ResizeVolume(volumeID, 0)
 }
 
 // GetFreeSpace returns the free space of the volume in bytes, total size of the volume in bytes and the used space of the volume in bytes

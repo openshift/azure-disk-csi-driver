@@ -97,7 +97,7 @@ func newDriverV2(options *DriverOptions) *DriverV2 {
 	driver.kubeClient = kubeClient
 
 	cloud, err := azureutils.GetCloudProviderFromClient(context.Background(), kubeClient, driver.cloudConfigSecretName, driver.cloudConfigSecretNamespace,
-		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.trafficManagerPort)
+		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.enableMinimumRetryAfter, driver.trafficManagerPort)
 	if err != nil {
 		klog.Fatalf("failed to get Azure Cloud Provider, error: %v", err)
 	}
@@ -105,7 +105,6 @@ func newDriverV2(options *DriverOptions) *DriverV2 {
 
 	if driver.cloud != nil {
 		driver.diskController = NewManagedDiskController(driver.cloud)
-		driver.diskController.DisableUpdateCache = driver.disableUpdateCache
 		driver.diskController.AttachDetachInitialDelayInMs = int(driver.attachDetachInitialDelayInMs)
 		driver.clientFactory = driver.cloud.ComputeClientFactory
 		if driver.vmType != "" {
@@ -141,7 +140,7 @@ func newDriverV2(options *DriverOptions) *DriverV2 {
 		}
 	}
 
-	driver.mounter, err = mounter.NewSafeMounter(driver.enableWindowsHostProcess, driver.listDisksUsingWinCIM, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
+	driver.mounter, err = mounter.NewSafeMounter(driver.enableWindowsHostProcess, driver.useWinCIMAPI, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
 	if err != nil {
 		klog.Fatalf("Failed to get safe mounter. Error: %v", err)
 	}
@@ -215,25 +214,8 @@ func (d *DriverV2) Run(ctx context.Context) error {
 	return err
 }
 
-func (d *DriverV2) checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error) {
-	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
-	if err != nil {
-		return nil, err
-	}
-	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return nil, err
-	}
-
-	return diskClient.Get(ctx, resourceGroup, diskName)
-}
-
 func (d *DriverV2) checkDiskCapacity(ctx context.Context, subsID, resourceGroup, diskName string, requestGiB int) (bool, error) {
-	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return false, err
-	}
-	disk, err := diskClient.Get(ctx, resourceGroup, diskName)
+	disk, err := d.diskController.GetDisk(ctx, subsID, resourceGroup, diskName)
 	// Because we can not judge the reason of the error. Maybe the disk does not exist.
 	// So here we do not handle the error.
 	if err == nil {
@@ -242,6 +224,12 @@ func (d *DriverV2) checkDiskCapacity(ctx context.Context, subsID, resourceGroup,
 		}
 	}
 	return true, nil
+}
+
+func (d *DriverV2) checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error) {
+	newCtx, cancel := context.WithTimeout(ctx, time.Duration(d.getDiskTimeoutInSeconds)*time.Second)
+	defer cancel()
+	return d.diskController.GetDiskByURI(newCtx, diskURI)
 }
 
 func (d *DriverV2) getVolumeLocks() *volumehelper.VolumeLocks {

@@ -42,6 +42,33 @@ const (
 	IOCTL_STORAGE_QUERY_PROPERTY    = 0x002d1400
 )
 
+var _ DiskAPI = &powerShellDiskAPI{}
+
+type powerShellDiskAPI struct{}
+
+func NewPowerShellDiskAPI() *powerShellDiskAPI {
+	return &powerShellDiskAPI{}
+}
+
+type DiskAPI interface {
+	ListDiskLocations() (map[uint32]Location, error)
+	Rescan() error
+	IsDiskInitialized(diskNumber uint32) (bool, error)
+	InitializeDisk(diskNumber uint32) error
+	BasicPartitionsExist(diskNumber uint32) (bool, error)
+	CreateBasicPartition(diskNumber uint32) error
+	GetDiskNumberByName(page83ID string) (uint32, error)
+	GetDiskNumber(disk syscall.Handle) (uint32, error)
+	GetDiskPage83ID(disk syscall.Handle) (string, error)
+	GetDiskNumberWithID(page83ID string) (uint32, error)
+	GetDiskNumberAndPage83ID(path string) (uint32, string, error)
+	ListDiskIDs() (map[uint32]IDs, error)
+	GetDiskStats(diskNumber uint32) (int64, error)
+	SetDiskState(diskNumber uint32, isOnline bool) error
+	GetDiskState(diskNumber uint32) (bool, error)
+	PartitionDisk(diskNumber uint32) error
+}
+
 // ListDisksUsingCIM - constructs a map with the disk number as the key and the DiskLocation structure
 // as the value. The DiskLocation struct has various fields like the Adapter, Bus, Target and LUNID.
 func ListDisksUsingCIM() (map[uint32]Location, error) {
@@ -58,7 +85,7 @@ func ListDisksUsingCIM() (map[uint32]Location, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list disk location. cmd: %q, output: %q, err %v", cmd, string(out), err)
 	}
-	klog.V(6).Infof("ListDisksUsingCIM output: %s", string(out))
+	klog.V(5).Infof("ListDisksUsingCIM output: %s", string(out))
 
 	var getCimInstance []struct {
 		Index           uint32 `json:"Index"`
@@ -86,7 +113,7 @@ func ListDisksUsingCIM() (map[uint32]Location, error) {
 
 // ListDiskLocations - constructs a map with the disk number as the key and the DiskLocation structure
 // as the value. The DiskLocation struct has various fields like the Adapter, Bus, Target and LUNID.
-func ListDiskLocations() (map[uint32]Location, error) {
+func (*powerShellDiskAPI) ListDiskLocations() (map[uint32]Location, error) {
 	// sample response
 	// [{
 	//    "number":  0,
@@ -97,7 +124,7 @@ func ListDiskLocations() (map[uint32]Location, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list disk location. cmd: %q, output: %q, err %v", cmd, string(out), err)
 	}
-	klog.V(6).Infof("ListDiskLocations output: %s", string(out))
+	klog.V(5).Infof("ListDiskLocations output: %s", string(out))
 
 	var getDisk []map[string]interface{}
 	err = json.Unmarshal(out, &getDisk)
@@ -127,12 +154,16 @@ func ListDiskLocations() (map[uint32]Location, error) {
 					switch strings.TrimSpace(itemSplit[0]) {
 					case "Adapter":
 						d.Adapter = strings.TrimSpace(itemSplit[1])
+						if d.Adapter == "0" {
+							klog.V(2).Infof("skipping adapter 0 disk, number: %d, location: %s", int(num), str)
+							found = false
+						}
 					case "Target":
 						d.Target = strings.TrimSpace(itemSplit[1])
 					case "LUN":
 						d.LUNID = strings.TrimSpace(itemSplit[1])
 					default:
-						klog.Warningf("Got unknown field : %s=%s", itemSplit[0], itemSplit[1])
+						klog.V(6).Infof("Got unknown field : %s=%s", itemSplit[0], itemSplit[1])
 					}
 				}
 			}
@@ -145,7 +176,7 @@ func ListDiskLocations() (map[uint32]Location, error) {
 	return m, nil
 }
 
-func Rescan() error {
+func (*powerShellDiskAPI) Rescan() error {
 	cmd := "Update-HostStorageCache"
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -154,7 +185,7 @@ func Rescan() error {
 	return nil
 }
 
-func IsDiskInitialized(diskNumber uint32) (bool, error) {
+func (*powerShellDiskAPI) IsDiskInitialized(diskNumber uint32) (bool, error) {
 	cmd := fmt.Sprintf("Get-Disk -Number %d | Where partitionstyle -eq 'raw'", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -167,7 +198,7 @@ func IsDiskInitialized(diskNumber uint32) (bool, error) {
 	return false, nil
 }
 
-func InitializeDisk(diskNumber uint32) error {
+func (*powerShellDiskAPI) InitializeDisk(diskNumber uint32) error {
 	cmd := fmt.Sprintf("Initialize-Disk -Number %d -PartitionStyle GPT", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -176,7 +207,7 @@ func InitializeDisk(diskNumber uint32) error {
 	return nil
 }
 
-func BasicPartitionsExist(diskNumber uint32) (bool, error) {
+func (*powerShellDiskAPI) BasicPartitionsExist(diskNumber uint32) (bool, error) {
 	cmd := fmt.Sprintf("Get-Partition | Where DiskNumber -eq %d | Where Type -ne Reserved", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -189,7 +220,7 @@ func BasicPartitionsExist(diskNumber uint32) (bool, error) {
 	return false, nil
 }
 
-func CreateBasicPartition(diskNumber uint32) error {
+func (*powerShellDiskAPI) CreateBasicPartition(diskNumber uint32) error {
 	cmd := fmt.Sprintf("New-Partition -DiskNumber %d -UseMaximumSize", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -198,11 +229,11 @@ func CreateBasicPartition(diskNumber uint32) error {
 	return nil
 }
 
-func GetDiskNumberByName(page83ID string) (uint32, error) {
-	return GetDiskNumberWithID(page83ID)
+func (p *powerShellDiskAPI) GetDiskNumberByName(page83ID string) (uint32, error) {
+	return p.GetDiskNumberWithID(page83ID)
 }
 
-func GetDiskNumber(disk syscall.Handle) (uint32, error) {
+func (*powerShellDiskAPI) GetDiskNumber(disk syscall.Handle) (uint32, error) {
 	var bytes uint32
 	devNum := StorageDeviceNumber{}
 	buflen := uint32(unsafe.Sizeof(devNum.DeviceType)) + uint32(unsafe.Sizeof(devNum.DeviceNumber)) + uint32(unsafe.Sizeof(devNum.PartitionNumber))
@@ -212,7 +243,7 @@ func GetDiskNumber(disk syscall.Handle) (uint32, error) {
 	return devNum.DeviceNumber, err
 }
 
-func GetDiskPage83ID(disk syscall.Handle) (string, error) {
+func (*powerShellDiskAPI) GetDiskPage83ID(disk syscall.Handle) (string, error) {
 	query := StoragePropertyQuery{}
 
 	bufferSize := uint32(4 * 1024)
@@ -254,7 +285,7 @@ func GetDiskPage83ID(disk syscall.Handle) (string, error) {
 	return "", nil
 }
 
-func GetDiskNumberWithID(page83ID string) (uint32, error) {
+func (p *powerShellDiskAPI) GetDiskNumberWithID(page83ID string) (uint32, error) {
 	cmd := "ConvertTo-Json @(Get-Disk | Select Path)"
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -269,7 +300,7 @@ func GetDiskNumberWithID(page83ID string) (uint32, error) {
 	}
 
 	for i := range disks {
-		diskNumber, diskPage83ID, err := GetDiskNumberAndPage83ID(disks[i].Path)
+		diskNumber, diskPage83ID, err := p.GetDiskNumberAndPage83ID(disks[i].Path)
 		if err != nil {
 			return 0, err
 		}
@@ -282,19 +313,19 @@ func GetDiskNumberWithID(page83ID string) (uint32, error) {
 	return 0, fmt.Errorf("Could not find disk with Page83 ID %s", page83ID)
 }
 
-func GetDiskNumberAndPage83ID(path string) (uint32, string, error) {
+func (p *powerShellDiskAPI) GetDiskNumberAndPage83ID(path string) (uint32, string, error) {
 	h, err := syscall.Open(path, syscall.O_RDONLY, 0)
 	defer syscall.Close(h)
 	if err != nil {
 		return 0, "", err
 	}
 
-	diskNumber, err := GetDiskNumber(h)
+	diskNumber, err := p.GetDiskNumber(h)
 	if err != nil {
 		return 0, "", err
 	}
 
-	page83ID, err := GetDiskPage83ID(h)
+	page83ID, err := p.GetDiskPage83ID(h)
 	if err != nil {
 		return 0, "", err
 	}
@@ -304,7 +335,7 @@ func GetDiskNumberAndPage83ID(path string) (uint32, string, error) {
 
 // ListDiskIDs - constructs a map with the disk number as the key and the DiskID structure
 // as the value. The DiskID struct has a field for the page83 ID.
-func ListDiskIDs() (map[uint32]IDs, error) {
+func (p *powerShellDiskAPI) ListDiskIDs() (map[uint32]IDs, error) {
 	// sample response
 	// [
 	// {
@@ -330,7 +361,7 @@ func ListDiskIDs() (map[uint32]IDs, error) {
 	m := make(map[uint32]IDs)
 
 	for i := range disks {
-		diskNumber, page83, err := GetDiskNumberAndPage83ID(disks[i].Path)
+		diskNumber, page83, err := p.GetDiskNumberAndPage83ID(disks[i].Path)
 		if err != nil {
 			return nil, err
 		}
@@ -344,7 +375,7 @@ func ListDiskIDs() (map[uint32]IDs, error) {
 	return m, nil
 }
 
-func GetDiskStats(diskNumber uint32) (int64, error) {
+func (*powerShellDiskAPI) GetDiskStats(diskNumber uint32) (int64, error) {
 	cmd := fmt.Sprintf("(Get-Disk -Number %d).Size", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil || len(out) == 0 {
@@ -366,7 +397,7 @@ func GetDiskStats(diskNumber uint32) (int64, error) {
 	return diskSize, nil
 }
 
-func SetDiskState(diskNumber uint32, isOnline bool) error {
+func (*powerShellDiskAPI) SetDiskState(diskNumber uint32, isOnline bool) error {
 	cmd := fmt.Sprintf("Set-Disk -Number %d -IsOffline $%t;Set-Disk -Number %d -IsReadOnly $false", diskNumber, !isOnline, diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -376,7 +407,7 @@ func SetDiskState(diskNumber uint32, isOnline bool) error {
 	return nil
 }
 
-func GetDiskState(diskNumber uint32) (bool, error) {
+func (*powerShellDiskAPI) GetDiskState(diskNumber uint32) (bool, error) {
 	cmd := fmt.Sprintf("(Get-Disk -Number %d) | Select-Object -ExpandProperty IsOffline", diskNumber)
 	out, err := azureutils.RunPowershellCmd(cmd)
 	if err != nil {
@@ -392,17 +423,17 @@ func GetDiskState(diskNumber uint32) (bool, error) {
 	return !isOffline, nil
 }
 
-func PartitionDisk(diskNumber uint32) error {
+func (p *powerShellDiskAPI) PartitionDisk(diskNumber uint32) error {
 	klog.V(6).Infof("Request: PartitionDisk with diskNumber=%d", diskNumber)
 
-	initialized, err := IsDiskInitialized(diskNumber)
+	initialized, err := p.IsDiskInitialized(diskNumber)
 	if err != nil {
 		klog.Errorf("IsDiskInitialized failed: %v", err)
 		return err
 	}
 	if !initialized {
 		klog.V(4).Infof("Initializing disk %d", diskNumber)
-		err = InitializeDisk(diskNumber)
+		err = p.InitializeDisk(diskNumber)
 		if err != nil {
 			klog.Errorf("failed InitializeDisk %v", err)
 			return err
@@ -412,14 +443,14 @@ func PartitionDisk(diskNumber uint32) error {
 	}
 
 	klog.V(6).Infof("Checking if disk %d has basic partitions", diskNumber)
-	partitioned, err := BasicPartitionsExist(diskNumber)
+	partitioned, err := p.BasicPartitionsExist(diskNumber)
 	if err != nil {
 		klog.Errorf("failed check BasicPartitionsExist %v", err)
 		return err
 	}
 	if !partitioned {
 		klog.V(4).Infof("Creating basic partition on disk %d", diskNumber)
-		err = CreateBasicPartition(diskNumber)
+		err = p.CreateBasicPartition(diskNumber)
 		if err != nil {
 			klog.Errorf("failed CreateBasicPartition %v", err)
 			return err

@@ -61,7 +61,7 @@ helm repo update azuredisk-csi-driver
 ### install a specific version
 
 ```console
-helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version 1.31.2
+helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version 1.32.1
 ```
 
 ### install on Azure Stack
@@ -122,10 +122,10 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v5.2.0`                                                       |
 | `image.csiProvisioner.pullPolicy`                 | csi-provisioner image pull policy                          | `IfNotPresent`                                                 |
 | `image.csiAttacher.repository`                    | csi-attacher container image                                  | `/oss/kubernetes-csi/csi-attacher`            |
-| `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.8.0`                                                       |
+| `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.8.1`                                                       |
 | `image.csiAttacher.pullPolicy`                    | csi-attacher image pull policy                             | `IfNotPresent`                                                 |
 | `image.csiResizer.repository`                     | csi-resizer container image                                   | `/oss/kubernetes-csi/csi-resizer`             |
-| `image.csiResizer.tag`                            | csi-resizer container image tag                               | `v1.13.1`                                                       |
+| `image.csiResizer.tag`                            | csi-resizer container image tag                               | `v1.13.2`                                                       |
 | `image.csiResizer.pullPolicy`                     | csi-resizer image pull policy                              | `IfNotPresent`                                                 |
 | `image.livenessProbe.repository`                  | liveness-probe container image                                | `/oss/kubernetes-csi/livenessprobe`           |
 | `image.livenessProbe.tag`                         | liveness-probe container image tag                            | `v2.15.0`                                                       |
@@ -188,16 +188,18 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `node.reservedDataDiskSlotNum`                  | reserved data disk slot number per node by default(`0`)    | `0` |
 | `node.supportZone`                                | Whether getting zone info in NodeGetInfo on the node (requires instance metadata support)               | `true`
 | `node.getNodeIDFromIMDS`                          | Whether getting NodeID from IMDS on the node (requires instance metadata support)               | `false`
+| `node.removeNotReadyTaint`                        | Whether enable the startup taint removal feature            | `true`
 | `node.allowEmptyCloudConfig`                      | Whether allow running node driver without cloud config               | `true`
 | `node.maxUnavailable`                             | `maxUnavailable` value of driver node daemonset            | `1`
+| `node.metricsPort`                          | metrics port of driver node daemonset                   | `29605`                                                        |
 | `node.livenessProbe.healthPort`                   | health check port for liveness probe                       | `29603` |
 | `node.logLevel`                                   | node driver log level                                      |`5`                                                           |
 | `snapshot.enabled`                                | whether enable snapshot feature                            | `false`                                                        |
 | `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter container image                               | `/oss/kubernetes-csi/csi-snapshotter`         |
-| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter container image tag                           | `v8.2.0`                                                       |
+| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter container image tag                           | `v8.2.1`                                                       |
 | `snapshot.image.csiSnapshotter.pullPolicy`        | csi-snapshotter image pull policy                          | `IfNotPresent`                                                 |
 | `snapshot.image.csiSnapshotController.repository` | snapshot-controller container image                           | `/oss/kubernetes-csi/snapshot-controller`     |
-| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller container image tag                       | `v8.2.0`                                                      |
+| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller container image tag                       | `v8.2.1`                                                      |
 | `snapshot.image.csiSnapshotController.pullPolicy` | snapshot-controller image pull policy                      | `IfNotPresent`                                                 |
 | `snapshot.snapshotController.name`                | snapshot controller name                                   | `csi-snapshot-controller`                                                           |
 | `snapshot.snapshotController.replicas`            | the replicas of snapshot-controller                        | `2`                                                            |

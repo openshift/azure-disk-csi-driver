@@ -63,8 +63,6 @@ import (
 var (
 	useDriverV2 = flag.Bool("temp-use-driver-v2", false, "A temporary flag to enable early test and development of Azure Disk CSI Driver V2. This will be removed in the future.")
 
-	// taintRemovalInitialDelay is the initial delay for node taint removal
-	taintRemovalInitialDelay = 1 * time.Second
 	// taintRemovalBackoff is the exponential backoff configuration for node taint removal
 	taintRemovalBackoff = wait.Backoff{
 		Duration: 500 * time.Millisecond,
@@ -116,7 +114,6 @@ type DriverCore struct {
 	supportZone                  bool
 	getNodeInfoFromLabels        bool
 	enableDiskCapacityCheck      bool
-	disableUpdateCache           bool
 	enableTrafficManager         bool
 	trafficManagerPort           int64
 	vmssCacheTTLInSeconds        int64
@@ -125,12 +122,14 @@ type DriverCore struct {
 	getDiskTimeoutInSeconds      int64
 	vmType                       string
 	enableWindowsHostProcess     bool
-	listDisksUsingWinCIM         bool
+	useWinCIMAPI                 bool
 	getNodeIDFromIMDS            bool
 	enableOtelTracing            bool
 	shouldWaitForSnapshotReady   bool
 	checkDiskLUNCollision        bool
+	checkDiskCountForBatching    bool
 	forceDetachBackoff           bool
+	waitForDetach                bool
 	endpoint                     string
 	disableAVSetNodes            bool
 	removeNotReadyTaint          bool
@@ -139,6 +138,7 @@ type DriverCore struct {
 	volStatsCache           azcache.Resource
 	maxConcurrentFormat     int64
 	concurrentFormatTimeout int64
+	enableMinimumRetryAfter bool
 }
 
 // Driver is the v1 implementation of the Azure Disk CSI Driver.
@@ -173,7 +173,6 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.supportZone = options.SupportZone
 	driver.getNodeInfoFromLabels = options.GetNodeInfoFromLabels
 	driver.enableDiskCapacityCheck = options.EnableDiskCapacityCheck
-	driver.disableUpdateCache = options.DisableUpdateCache
 	driver.attachDetachInitialDelayInMs = options.AttachDetachInitialDelayInMs
 	driver.enableTrafficManager = options.EnableTrafficManager
 	driver.trafficManagerPort = options.TrafficManagerPort
@@ -182,20 +181,24 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.getDiskTimeoutInSeconds = options.GetDiskTimeoutInSeconds
 	driver.vmType = options.VMType
 	driver.enableWindowsHostProcess = options.EnableWindowsHostProcess
-	driver.listDisksUsingWinCIM = options.ListDisksUsingWinCIM
+	driver.useWinCIMAPI = options.UseWinCIMAPI
 	driver.getNodeIDFromIMDS = options.GetNodeIDFromIMDS
 	driver.enableOtelTracing = options.EnableOtelTracing
 	driver.shouldWaitForSnapshotReady = options.WaitForSnapshotReady
 	driver.checkDiskLUNCollision = options.CheckDiskLUNCollision
+	driver.checkDiskCountForBatching = options.CheckDiskCountForBatching
 	driver.forceDetachBackoff = options.ForceDetachBackoff
+	driver.waitForDetach = options.WaitForDetach
 	driver.endpoint = options.Endpoint
 	driver.disableAVSetNodes = options.DisableAVSetNodes
 	driver.removeNotReadyTaint = options.RemoveNotReadyTaint
 	driver.maxConcurrentFormat = options.MaxConcurrentFormat
 	driver.concurrentFormatTimeout = options.ConcurrentFormatTimeout
+	driver.enableMinimumRetryAfter = options.EnableMinimumRetryAfter
 	driver.volumeLocks = volumehelper.NewVolumeLocks()
 	driver.ioHandler = azureutils.NewOSIOHandler()
 	driver.hostUtil = hostutil.NewHostUtil()
+
 	if driver.NodeID == "" {
 		// nodeid is not needed in controller component
 		klog.Warning("nodeid is empty")
@@ -228,7 +231,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.kubeClient = kubeClient
 
 	cloud, err := azureutils.GetCloudProviderFromClient(context.Background(), kubeClient, driver.cloudConfigSecretName, driver.cloudConfigSecretNamespace,
-		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.trafficManagerPort)
+		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.enableMinimumRetryAfter, driver.trafficManagerPort)
 	if err != nil {
 		klog.Fatalf("failed to get Azure Cloud Provider, error: %v", err)
 	}
@@ -266,9 +269,10 @@ func newDriverV1(options *DriverOptions) *Driver {
 		}
 
 		driver.diskController = NewManagedDiskController(driver.cloud)
-		driver.diskController.DisableUpdateCache = driver.disableUpdateCache
 		driver.diskController.AttachDetachInitialDelayInMs = int(driver.attachDetachInitialDelayInMs)
 		driver.diskController.ForceDetachBackoff = driver.forceDetachBackoff
+		driver.diskController.WaitForDetach = driver.waitForDetach
+		driver.diskController.CheckDiskCountForBatching = driver.checkDiskCountForBatching
 	}
 
 	driver.deviceHelper = optimization.NewSafeDeviceHelper()
@@ -280,7 +284,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 		}
 	}
 
-	driver.mounter, err = mounter.NewSafeMounter(driver.enableWindowsHostProcess, driver.listDisksUsingWinCIM, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
+	driver.mounter, err = mounter.NewSafeMounter(driver.enableWindowsHostProcess, driver.useWinCIMAPI, driver.useCSIProxyGAInterface, int(driver.maxConcurrentFormat), time.Duration(driver.concurrentFormatTimeout)*time.Second)
 	if err != nil {
 		klog.Fatalf("Failed to get safe mounter. Error: %v", err)
 	}
@@ -319,7 +323,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 	if kubeClient != nil && driver.removeNotReadyTaint && driver.NodeID != "" {
 		// Remove taint from node to indicate driver startup success
 		// This is done at the last possible moment to prevent race conditions or false positive removals
-		time.AfterFunc(taintRemovalInitialDelay, func() {
+		time.AfterFunc(time.Duration(options.TaintRemovalInitialDelayInSeconds)*time.Second, func() {
 			removeTaintInBackground(kubeClient, driver.NodeID, driver.Name, taintRemovalBackoff, removeNotReadyTaint)
 		})
 	}
@@ -401,19 +405,9 @@ func (d *Driver) checkDiskExists(ctx context.Context, diskURI string) (*armcompu
 		return nil, nil
 	}
 
-	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
-	if err != nil {
-		return nil, err
-	}
-	diskClient, err := d.diskController.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return nil, err
-	}
-
 	newCtx, cancel := context.WithTimeout(ctx, time.Duration(d.getDiskTimeoutInSeconds)*time.Second)
 	defer cancel()
-
-	return diskClient.Get(newCtx, resourceGroup, diskName)
+	return d.diskController.GetDiskByURI(newCtx, diskURI)
 }
 
 func (d *Driver) checkDiskCapacity(ctx context.Context, subsID, resourceGroup, diskName string, requestGiB int) (bool, error) {
@@ -421,11 +415,7 @@ func (d *Driver) checkDiskCapacity(ctx context.Context, subsID, resourceGroup, d
 		klog.Warningf("skip checkDiskCapacity(%s, %s) since it's still in throttling", resourceGroup, diskName)
 		return true, nil
 	}
-	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return false, err
-	}
-	disk, err := diskClient.Get(ctx, resourceGroup, diskName)
+	disk, err := d.diskController.GetDisk(ctx, subsID, resourceGroup, diskName)
 	// Because we can not judge the reason of the error. Maybe the disk does not exist.
 	// So here we do not handle the error.
 	if err == nil {

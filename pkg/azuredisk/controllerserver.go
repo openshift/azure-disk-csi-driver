@@ -128,20 +128,21 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 
 	if diskParams.UserAgent != "" {
 		localCloud, err = azureutils.GetCloudProviderFromClient(ctx, d.kubeClient, d.cloudConfigSecretName, d.cloudConfigSecretNamespace, diskParams.UserAgent,
-			d.allowEmptyCloudConfig, d.enableTrafficManager, d.trafficManagerPort)
+			d.allowEmptyCloudConfig, d.enableTrafficManager, d.enableMinimumRetryAfter, d.trafficManagerPort)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "create cloud with UserAgent(%s) failed with: (%s)", diskParams.UserAgent, err)
 		}
 		localDiskController = &ManagedDiskController{
 			controllerCommon: &controllerCommon{
-				cloud:               localCloud,
-				lockMap:             newLockMap(),
-				DisableDiskLunCheck: true,
-				clientFactory:       localCloud.ComputeClientFactory,
-				ForceDetachBackoff:  d.forceDetachBackoff,
+				cloud:                     localCloud,
+				lockMap:                   newLockMap(),
+				DisableDiskLunCheck:       true,
+				clientFactory:             localCloud.ComputeClientFactory,
+				ForceDetachBackoff:        d.forceDetachBackoff,
+				WaitForDetach:             d.waitForDetach,
+				CheckDiskCountForBatching: d.checkDiskCountForBatching,
 			},
 		}
-		localDiskController.DisableUpdateCache = d.disableUpdateCache
 		localDiskController.AttachDetachInitialDelayInMs = int(d.attachDetachInitialDelayInMs)
 
 	}
@@ -914,20 +915,12 @@ func (d *Driver) ControllerExpandVolume(ctx context.Context, req *csi.Controller
 	requestSize := *resource.NewQuantity(capacityBytes, resource.BinarySI)
 
 	diskURI := req.GetVolumeId()
-	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
-	}
-	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "could not get disk client for subscription(%s) with error(%v)", subsID, err)
-	}
-	result, rerr := diskClient.Get(ctx, resourceGroup, diskName)
+	result, rerr := d.diskController.GetDiskByURI(ctx, diskURI)
 	if rerr != nil {
-		return nil, status.Errorf(codes.Internal, "could not get the disk(%s) under rg(%s) with error(%v)", diskName, resourceGroup, rerr)
+		return nil, status.Errorf(codes.Internal, "GetDiskByURI(%s) failed with error(%v)", diskURI, rerr)
 	}
-	if result.Properties == nil || result.Properties.DiskSizeGB == nil {
-		return nil, status.Errorf(codes.Internal, "could not get size of the disk(%s)", diskName)
+	if result == nil || result.Properties == nil || result.Properties.DiskSizeGB == nil {
+		return nil, status.Errorf(codes.Internal, "could not get size of the disk(%s)", diskURI)
 	}
 	oldSize := *resource.NewQuantity(int64(*result.Properties.DiskSizeGB), resource.BinarySI)
 
@@ -1008,7 +1001,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 		case consts.UserAgentField:
 			newUserAgent := v
 			localCloud, err = azureutils.GetCloudProviderFromClient(ctx, d.kubeClient, d.cloudConfigSecretName, d.cloudConfigSecretNamespace, newUserAgent,
-				d.allowEmptyCloudConfig, d.enableTrafficManager, d.trafficManagerPort)
+				d.allowEmptyCloudConfig, d.enableTrafficManager, d.enableMinimumRetryAfter, d.trafficManagerPort)
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "create cloud with UserAgent(%s) failed with: (%s)", newUserAgent, err)
 			}
@@ -1273,15 +1266,11 @@ func (d *Driver) GetSourceDiskSize(ctx context.Context, subsID, resourceGroup, d
 	if curDepth > maxDepth {
 		return nil, nil, status.Error(codes.Internal, fmt.Sprintf("current depth (%d) surpassed the max depth (%d) while searching for the source disk size", curDepth, maxDepth))
 	}
-	diskClient, err := d.clientFactory.GetDiskClientForSub(subsID)
-	if err != nil {
-		return nil, nil, status.Error(codes.Internal, err.Error())
-	}
-	result, err := diskClient.Get(ctx, resourceGroup, diskName)
+	result, err := d.diskController.GetDisk(ctx, subsID, resourceGroup, diskName)
 	if err != nil {
 		return nil, result, err
 	}
-	if result.Properties == nil {
+	if result == nil || result.Properties == nil {
 		return nil, result, status.Error(codes.Internal, fmt.Sprintf("DiskProperty not found for disk (%s) in resource group (%s)", diskName, resourceGroup))
 	}
 
