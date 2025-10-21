@@ -63,11 +63,17 @@ var (
 	}
 )
 
-// FakeDriver defines an interface unit tests use to test either the v1 or v2 implementation of the Azure Disk CSI Driver.
+// FakeDriver defines an interface unit tests use to test the implementation of the Azure Disk CSI Driver.
 type FakeDriver interface {
 	CSIDriver
 
 	GetSourceDiskSize(ctx context.Context, subsID, resourceGroup, diskName string, curDepth, maxDepth int) (*int32, *armcompute.Disk, error)
+	SetWaitForSnapshotReady(bool)
+	GetWaitForSnapshotReady() bool
+	GetDiskController() *ManagedDiskController
+	GetMigrationMonitor() *MigrationProgressMonitor
+	SetMigrationMonitor(*MigrationProgressMonitor)
+	RecoverMigrationMonitor(ctx context.Context) error
 
 	setNextCommandOutputScripts(scripts ...testingexec.FakeAction)
 
@@ -90,6 +96,7 @@ type FakeDriver interface {
 	checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error)
 	waitForSnapshotReady(context.Context, string, string, string, time.Duration, time.Duration) error
 	getSnapshotByID(context.Context, string, string, string, string) (*csi.Snapshot, error)
+	getSnapshotSKU(context.Context, string) (string, error)
 	ensureMountPoint(string) (bool, error)
 	ensureBlockTargetFile(string) error
 	getDevicePathWithLUN(lunStr string) (string, error)
@@ -98,12 +105,13 @@ type FakeDriver interface {
 	getUsedLunsFromNode(context.Context, types.NodeName) ([]int, error)
 }
 
-type fakeDriverV1 struct {
+type fakeDriver struct {
 	Driver
 }
 
-func newFakeDriverV1(ctrl *gomock.Controller) (*fakeDriverV1, error) {
-	driver := fakeDriverV1{}
+// NewFakeDriver returns a driver implementation suitable for use in unit tests.
+func NewFakeDriver(ctrl *gomock.Controller) (FakeDriver, error) {
+	driver := fakeDriver{}
 	driver.Name = fakeDriverName
 	driver.Version = fakeDriverVersion
 	driver.NodeID = fakeNodeID
@@ -119,6 +127,7 @@ func newFakeDriverV1(ctrl *gomock.Controller) (*fakeDriverV1, error) {
 	driver.endpoint = "tcp://127.0.0.1:0"
 	driver.disableAVSetNodes = true
 	driver.kubeClient = fake.NewSimpleClientset()
+	driver.enableMigrationMonitor = true
 
 	driver.cloud = azure.GetTestCloud(ctrl)
 	driver.diskController = NewManagedDiskController(driver.cloud)
@@ -162,14 +171,14 @@ func newFakeDriverV1(ctrl *gomock.Controller) (*fakeDriverV1, error) {
 	return &driver, nil
 }
 
-func (d *fakeDriverV1) setNextCommandOutputScripts(scripts ...testingexec.FakeAction) {
+func (d *fakeDriver) setNextCommandOutputScripts(scripts ...testingexec.FakeAction) {
 	d.mounter.Exec.(*mounter.FakeSafeMounter).SetNextCommandOutputScripts(scripts...)
 }
 
-func (d *fakeDriverV1) setThrottlingCache(key string, value string) {
+func (d *fakeDriver) setThrottlingCache(key string, value string) {
 	d.throttlingCache.Set(key, value)
 }
-func (d *fakeDriverV1) getClientFactory() azclient.ClientFactory {
+func (d *fakeDriver) getClientFactory() azclient.ClientFactory {
 	return d.clientFactory
 }
 
@@ -188,4 +197,38 @@ func createVolumeCapability(accessMode csi.VolumeCapability_AccessMode_Mode) *cs
 			Mode: accessMode,
 		},
 	}
+}
+
+func (d *fakeDriver) SetWaitForSnapshotReady(shouldWait bool) {
+	d.shouldWaitForSnapshotReady = shouldWait
+}
+
+func (d *fakeDriver) GetWaitForSnapshotReady() bool {
+	return d.shouldWaitForSnapshotReady
+}
+
+func (d *fakeDriver) GetDiskController() *ManagedDiskController {
+	if d.diskController == nil {
+		d.diskController = NewManagedDiskController(d.cloud)
+	}
+	return d.diskController
+}
+
+func (d *fakeDriver) GetMigrationMonitor() *MigrationProgressMonitor {
+	if d.migrationMonitor == nil {
+		d.migrationMonitor = NewMigrationProgressMonitor(d.kubeClient, d.eventRecorder, d.GetDiskController())
+	}
+	return d.migrationMonitor
+}
+
+func (d *fakeDriver) SetMigrationMonitor(monitor *MigrationProgressMonitor) {
+	if monitor == nil {
+		d.migrationMonitor = NewMigrationProgressMonitor(d.kubeClient, d.eventRecorder, d.GetDiskController())
+	} else {
+		d.migrationMonitor = monitor
+	}
+}
+
+func (d *fakeDriver) RecoverMigrationMonitor(ctx context.Context) error {
+	return d.recoverMigrationMonitorsFromLabels(ctx)
 }

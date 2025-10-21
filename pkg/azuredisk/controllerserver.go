@@ -63,6 +63,95 @@ type listVolumeStatus struct {
 	err           error
 }
 
+// startSKUMigrationMonitor starts (idempotently) an asynchronous monitor that tracks
+// migration of a managed disk from one SKU to another (currently only when moving
+// to PremiumV2).
+//
+// Parameters:
+//
+//	ctx                - request context
+//	isProvisioningFlow - true when invoked from CreateVolume (PV may not exist yet);
+//	                     false when invoked from ModifyVolume (PV should already exist).
+//	fromSKUStr         - original disk SKU name (string form, may differ in casing)
+//	toSKU              - target armcompute.DiskStorageAccountTypes (must be PremiumV2LRS to proceed)
+//	diskURI            - full Azure disk resource ID
+//	pvName             - Kubernetes PV name if known (CreateVolume path supplies req.Name;
+//	                     ModifyVolume path does not, so we derive it from diskURI)
+//	sizeBytes          - disk size (used to derive migration timeout)
+//
+// Workflow / decision points:
+// 1. Guard clauses:
+//   - If no migration monitor is configured OR fromSKUStr empty: do nothing.
+//   - If target SKU is not PremiumV2 OR already matches fromSKU: no migration needed.
+//
+// 2. PV name resolution:
+//   - If pvName is empty (ModifyVolume path) attempt to parse diskURI and use its last
+//     token (disk name) as the PV name.
+//   - If the cluster used static provisioning with a PV name different from the Azure
+//     disk name, this heuristic cannot map the disk to the PV; monitoring is skipped.
+//
+// 3. StartMonitoring call:
+//   - Calls migrationMonitor.StartMigrationMonitoring(ctx, isProvisioningFlow, ...).
+//   - isProvisioningFlow influences initial behavior inside the monitor:
+//   - Provisioning (true): PV may not yet exist. The monitor records a task with
+//     empty PVC metadata, attempts an initial label add (may fail if PV absent),
+//     and defers PV / PVC discovery, labeling, and start event emission to the
+//     periodic polling loop (monitorMigrationProgress).
+//   - Modify (false): PV should exist. The monitor immediately fetches the PV,
+//     derives PVC name/namespace, adds/ensures the migration label, and emits
+//     the "Started" event (unless label already existed; then it logs a resume).
+//
+// 4. Label management:
+//   - addMigrationLabelIfNotExists is executed once at start; if it fails (e.g. PV
+//     not yet created) task.PVLabeled remains false. The polling loop will retry
+//     labeling until successful.
+//
+// 5. Asynchronous monitoring:
+//   - A goroutine watches progress (polling Azure), emitting events for start (if
+//     deferred), incremental progress, completion, failure or timeout.
+//
+// 6. Error handling:
+//   - Non‑fatal issues (parse failure, start error) are logged and abort initiation
+//     for that disk; they do not propagate back to the CSI operation.
+//
+// Concurrency notes:
+//   - This function itself is lightweight and only delegates; StartMigrationMonitoring
+//     handles internal synchronization of task state.
+//   - Idempotency: if monitoring is already active for diskURI, underlying monitor
+//     short‑circuits.
+//
+// Returns: nothing; logs warnings on recoverable issues.
+//
+// NOTE: If future migrations support additional target SKUs, relax the toSKU check.
+func (d *Driver) startSKUMigrationMonitor(
+	ctx context.Context,
+	isProvisioningFlow bool,
+	fromSKUStr string,
+	toSKU armcompute.DiskStorageAccountTypes,
+	diskURI, pvName string,
+	sizeBytes int64,
+) {
+	if d.migrationMonitor == nil || fromSKUStr == "" {
+		return
+	}
+
+	if toSKU != armcompute.DiskStorageAccountTypesPremiumV2LRS || fromSKUStr == string(toSKU) {
+		return
+	}
+	if pvName == "" {
+		var parseErr error
+		_, _, pvName, parseErr = azureutils.GetInfoFromURI(diskURI)
+		if parseErr != nil {
+			klog.Warningf("Skipping monitor, failed to extract pv name from URI %s: %v", diskURI, parseErr)
+			return
+		}
+	}
+	if err := d.migrationMonitor.StartMigrationMonitoring(
+		ctx, isProvisioningFlow, diskURI, pvName, fromSKUStr, toSKU, sizeBytes); err != nil {
+		klog.Warningf("failed to start SKU migration monitoring for %s: %v", diskURI, err)
+	}
+}
+
 // CreateVolume provisions an azure disk
 func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	if err := d.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
@@ -211,7 +300,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if strings.EqualFold(diskParams.WriteAcceleratorEnabled, consts.TrueValue) {
 		diskParams.Tags[azure.WriteAcceleratorEnabled] = consts.TrueValue
 	}
-	var sourceID, sourceType string
+	var sourceID, sourceType, sourceSKU string
 	metricsRequest := "controller_create_volume"
 	content := req.GetVolumeContentSource()
 	if content != nil {
@@ -224,6 +313,11 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 						SnapshotId: sourceID,
 					},
 				},
+			}
+			// if migration monitoring is enabled and if target SKU is PremiumV2LRS, get the snapshot SKU
+			// the snapshot SKU is marked as source SKU
+			if skuName == armcompute.DiskStorageAccountTypesPremiumV2LRS && d.migrationMonitor != nil {
+				sourceSKU, _ = d.getSnapshotSKU(ctx, sourceID)
 			}
 			metricsRequest = "controller_create_volume_from_snapshot"
 		} else {
@@ -252,6 +346,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 						klog.V(2).Infof("source disk(%s) is in zone(%s), set diskZone as %s", sourceID, *disk.Zones[0], diskZone)
 					}
 				}
+				if d.migrationMonitor != nil && disk != nil && disk.SKU != nil {
+					sourceSKU = string(*disk.SKU.Name)
+				}
 			} else {
 				klog.Warningf("failed to get source disk(%s) size, err: %v", sourceID, err)
 			}
@@ -262,8 +359,8 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if strings.HasSuffix(strings.ToLower(string(skuName)), "zrs") {
 		klog.V(2).Infof("diskZone(%s) is reset as empty since disk(%s) is ZRS(%s)", diskZone, diskParams.DiskName, skuName)
 		diskZone = ""
-		// make volume scheduled on all 3 availability zones
-		for i := 1; i <= 3; i++ {
+		// make volume scheduled on all 4 availability zones
+		for i := 1; i <= 4; i++ {
 			topology := &csi.Topology{
 				Segments: map[string]string{topologyKey: fmt.Sprintf("%s-%d", diskParams.Location, i)},
 			}
@@ -341,6 +438,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
+	// Start migration monitoring if enabled
+	d.startSKUMigrationMonitor(ctx, true, sourceSKU, skuName, diskURI, req.Name, volSizeBytes)
+
 	isOperationSucceeded = true
 	klog.V(2).Infof("create azure disk(%s) account type(%s) rg(%s) location(%s) size(%d) tags(%s) successfully", diskParams.DiskName, skuName, diskParams.ResourceGroup, diskParams.Location, requestGiB, diskParams.Tags)
 
@@ -405,8 +505,10 @@ func (d *Driver) ControllerModifyVolume(ctx context.Context, req *csi.Controller
 	if err := d.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_MODIFY_VOLUME); err != nil {
 		return nil, status.Errorf(codes.Internal, "invalid modify volume req: %v", req)
 	}
+
 	diskURI := volumeID
-	if _, err := d.checkDiskExists(ctx, diskURI); err != nil {
+	currentDisk, err := d.checkDiskExists(ctx, diskURI)
+	if err != nil {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("Volume not found, failed with error: %v", err))
 	}
 
@@ -422,6 +524,25 @@ func (d *Driver) ControllerModifyVolume(ctx context.Context, req *csi.Controller
 	}
 	if diskParams.AccountType == "" {
 		skuName = ""
+	}
+
+	// Check if this is a SKU migration
+	var fromSKU armcompute.DiskStorageAccountTypes
+	var monitorSKUMigration bool
+	if currentDisk != nil && currentDisk.Properties != nil && d.migrationMonitor != nil {
+		if currentDisk.SKU != nil && currentDisk.SKU.Name != nil {
+			fromSKU = *currentDisk.SKU.Name
+			monitorSKUMigration = skuName == armcompute.DiskStorageAccountTypesPremiumV2LRS && fromSKU == armcompute.DiskStorageAccountTypesPremiumLRS
+		}
+
+		// modifyVolume will be reattempted if controller restarts. In case if the controller restarted after updating disk sku to PremiumV2LRS & before we label,
+		// we may not be able to detect the migration post restart, hence during re-attempt, we can check this condition and set monitorSKUMigration accordingly
+		if !monitorSKUMigration {
+			if currentDisk.Properties != nil && currentDisk.Properties.DiskSizeGB != nil &&
+				currentDisk.Properties.CompletionPercent != nil && *currentDisk.Properties.CompletionPercent < float32(100.0) {
+				monitorSKUMigration = fromSKU == armcompute.DiskStorageAccountTypesPremiumV2LRS
+			}
+		}
 	}
 
 	klog.V(2).Infof("begin to modify azure disk(%s) account type(%s) rg(%s) location(%s)",
@@ -451,6 +572,13 @@ func (d *Driver) ControllerModifyVolume(ctx context.Context, req *csi.Controller
 	}
 
 	isOperationSucceeded = true
+
+	// Start migration monitoring if this is a SKU change
+	if monitorSKUMigration {
+		volSizeBytes := int64(*currentDisk.Properties.DiskSizeGB) * 1024 * 1024 * 1024
+		d.startSKUMigrationMonitor(ctx, false, string(fromSKU), skuName, diskURI, "", volSizeBytes)
+	}
+
 	klog.V(2).Infof("modify azure disk(%s) account type(%s) rg(%s) location(%s) successfully", diskParams.DiskName, skuName, diskParams.ResourceGroup, diskParams.Location)
 
 	return &csi.ControllerModifyVolumeResponse{}, err
@@ -1092,8 +1220,11 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 	}
 	mc := metrics.NewMetricContext(consts.AzureDiskCSIDriverName, metricsRequest, d.cloud.ResourceGroup, d.cloud.SubscriptionID, d.Name)
 	isOperationSucceeded := false
+	isOperationInProgress := false
 	defer func() {
-		mc.ObserveOperationWithResult(isOperationSucceeded, consts.SourceResourceID, sourceVolumeID, consts.SnapshotName, snapshotName)
+		if !isOperationInProgress {
+			mc.ObserveOperationWithResult(isOperationSucceeded, consts.SourceResourceID, sourceVolumeID, consts.SnapshotName, snapshotName)
+		}
 	}()
 
 	klog.V(2).Infof("begin to create snapshot(%s, incremental: %v) under rg(%s) region(%s)", snapshotName, incremental, resourceGroup, d.cloud.Location)
@@ -1101,13 +1232,17 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "could not get snapshot client for subscription(%s) with error(%v)", subsID, err)
 	}
-	if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, snapshotName, snapshot); err != nil {
-		if strings.Contains(err.Error(), "existing disk") {
-			return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", snapshotName, resourceGroup, err))
-		}
 
-		azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
-		return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err.Error()))
+	csiSnapshot, _ := d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, "")
+	if csiSnapshot == nil || sourceVolumeID != csiSnapshot.SourceVolumeId {
+		if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, snapshotName, snapshot); err != nil {
+			if strings.Contains(err.Error(), "existing disk") {
+				return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", snapshotName, resourceGroup, err))
+			}
+
+			azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
+			return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err.Error()))
+		}
 	}
 
 	if d.shouldWaitForSnapshotReady {
@@ -1117,51 +1252,67 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 	}
 	klog.V(2).Infof("create snapshot(%s) under rg(%s) region(%s) successfully", snapshotName, resourceGroup, d.cloud.Location)
 
-	csiSnapshot, err := d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, sourceVolumeID)
+	csiSnapshot, err = d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, sourceVolumeID)
 	if err != nil {
 		return nil, err
+	} else if csiSnapshot == nil {
+		klog.Errorf("getSnapshotByID(%s, %s, %s) did not return a valid snapshot", subsID, resourceGroup, snapshotName)
+		return nil, status.Error(codes.Internal, fmt.Sprintf("getSnapshotByID(%s, %s, %s) did not return a valid snapshot", subsID, resourceGroup, snapshotName))
 	}
 
-	if crossRegionSnapshotName != "" {
-		copySnapshot := snapshot
-		if copySnapshot.Properties == nil {
-			copySnapshot.Properties = &armcompute.SnapshotProperties{}
-		}
-		if copySnapshot.Properties.CreationData == nil {
-			copySnapshot.Properties.CreationData = &armcompute.CreationData{}
-		}
-		copySnapshot.Properties.CreationData.SourceResourceID = &csiSnapshot.SnapshotId
-		copySnapshot.Properties.CreationData.CreateOption = to.Ptr(armcompute.DiskCreateOptionCopyStart)
-		copySnapshot.Location = &location
-
-		klog.V(2).Infof("begin to create snapshot(%s, incremental: %v) under rg(%s) region(%s)", crossRegionSnapshotName, incremental, resourceGroup, location)
-		if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, crossRegionSnapshotName, copySnapshot); err != nil {
-			if strings.Contains(err.Error(), "existing disk") {
-				return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", crossRegionSnapshotName, resourceGroup, err))
+	if csiSnapshot.ReadyToUse && crossRegionSnapshotName != "" {
+		crossRegionSnapshot, _ := d.getSnapshotByID(ctx, subsID, resourceGroup, crossRegionSnapshotName, sourceVolumeID)
+		if crossRegionSnapshot == nil {
+			copySnapshot := snapshot
+			if copySnapshot.Properties == nil {
+				copySnapshot.Properties = &armcompute.SnapshotProperties{}
 			}
+			if copySnapshot.Properties.CreationData == nil {
+				copySnapshot.Properties.CreationData = &armcompute.CreationData{}
+			}
+			copySnapshot.Properties.CreationData.SourceResourceID = &csiSnapshot.SnapshotId
+			copySnapshot.Properties.CreationData.CreateOption = to.Ptr(armcompute.DiskCreateOptionCopyStart)
+			copySnapshot.Location = &location
 
-			azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
-			return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err))
+			klog.V(2).Infof("begin to create snapshot(%s, incremental: %v) under rg(%s) region(%s)", crossRegionSnapshotName, incremental, resourceGroup, location)
+			if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, crossRegionSnapshotName, copySnapshot); err != nil {
+				if strings.Contains(err.Error(), "existing disk") {
+					return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", crossRegionSnapshotName, resourceGroup, err))
+				}
+
+				azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
+				return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err))
+			}
+			klog.V(2).Infof("create snapshot(%s) under rg(%s) region(%s) successfully", crossRegionSnapshotName, resourceGroup, location)
 		}
-		klog.V(2).Infof("create snapshot(%s) under rg(%s) region(%s) successfully", crossRegionSnapshotName, resourceGroup, location)
 
-		if err := d.waitForSnapshotReady(ctx, subsID, resourceGroup, crossRegionSnapshotName, waitForSnapshotReadyInterval, waitForSnapshotReadyTimeout); err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("waitForSnapshotReady(%s, %s, %s) failed with %v", subsID, resourceGroup, crossRegionSnapshotName, err))
-		}
-
-		klog.V(2).Infof("begin to delete snapshot(%s) under rg(%s) region(%s)", snapshotName, resourceGroup, d.cloud.Location)
-		if err = snapshotClient.Delete(ctx, resourceGroup, snapshotName); err != nil {
-			klog.Errorf("delete snapshot error: %v", err)
-			azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
-		} else {
-			klog.V(2).Infof("delete snapshot(%s) under rg(%s) region(%s) successfully", snapshotName, resourceGroup, d.cloud.Location)
+		if d.shouldWaitForSnapshotReady {
+			if err := d.waitForSnapshotReady(ctx, subsID, resourceGroup, crossRegionSnapshotName, waitForSnapshotReadyInterval, waitForSnapshotReadyTimeout); err != nil {
+				return nil, status.Error(codes.Internal, fmt.Sprintf("waitForSnapshotReady(%s, %s, %s) failed with %v", subsID, resourceGroup, crossRegionSnapshotName, err))
+			}
 		}
 
 		csiSnapshot, err = d.getSnapshotByID(ctx, subsID, resourceGroup, crossRegionSnapshotName, sourceVolumeID)
 		if err != nil {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
+
+		if csiSnapshot.ReadyToUse {
+			klog.V(2).Infof("begin to delete snapshot(%s) under rg(%s) region(%s)", snapshotName, resourceGroup, d.cloud.Location)
+			if err = snapshotClient.Delete(ctx, resourceGroup, snapshotName); err != nil {
+				klog.Errorf("delete snapshot error: %v", err)
+				azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
+			} else {
+				klog.V(2).Infof("delete snapshot(%s) under rg(%s) region(%s) successfully", snapshotName, resourceGroup, d.cloud.Location)
+			}
+		}
+
+	} else if crossRegionSnapshotName != "" {
+		// replace the last token of csiSnapshot.SnapshotId with crossRegionSnapshotName
+		csiSnapshot.SnapshotId = strings.TrimSuffix(csiSnapshot.SnapshotId, snapshotName) + crossRegionSnapshotName
 	}
+
+	isOperationInProgress = !csiSnapshot.ReadyToUse
 
 	createResp := &csi.CreateSnapshotResponse{
 		Snapshot: csiSnapshot,
@@ -1288,4 +1439,28 @@ func (d *Driver) GetSourceDiskSize(ctx context.Context, subsID, resourceGroup, d
 		return nil, result, status.Error(codes.Internal, fmt.Sprintf("DiskSizeGB for disk (%s) in resourcegroup (%s) is nil", diskName, resourceGroup))
 	}
 	return (*result.Properties).DiskSizeGB, result, nil
+}
+
+// getSnapshotSKU retrieves the SKU of the snapshot and returns the SKU or if any error occurs
+func (d *Driver) getSnapshotSKU(ctx context.Context, sourceID string) (string, error) {
+	subsID, resourceGroup, snapshotName, err := azureutils.GetInfoFromURI(sourceID)
+	if err != nil {
+		klog.Warningf("could not get subscription id, resource group from snapshot uri (%s) with error(%v)", sourceID, err)
+		return "", err
+	}
+	snapClient, err := d.clientFactory.GetSnapshotClientForSub(subsID)
+	if err != nil {
+		klog.Warningf("could not get snapshot client for subscription(%s) with error(%v)", subsID, err)
+		return "", err
+	}
+	result, err := snapClient.Get(ctx, resourceGroup, snapshotName)
+	if err != nil {
+		klog.Warningf("get snapshot %s from rg(%s) error: %v", snapshotName, resourceGroup, err)
+		return "", err
+	}
+	if result == nil || result.SKU == nil || result.SKU.Name == nil {
+		klog.Warningf("Snapshot or Snapshot property not found for snapshot (%s) in resource group (%s)", snapshotName, resourceGroup)
+		return "", status.Error(codes.NotFound, fmt.Sprintf("Snapshot or Snapshot property not found for snapshot (%s) in resource group (%s)", snapshotName, resourceGroup))
+	}
+	return string(*result.SKU.Name), nil
 }

@@ -49,10 +49,11 @@ type ManagedDiskController struct {
 
 func NewManagedDiskController(provider *provider.Cloud) *ManagedDiskController {
 	common := &controllerCommon{
-		cloud:                        provider,
-		lockMap:                      newLockMap(),
-		AttachDetachInitialDelayInMs: defaultAttachDetachInitialDelayInMs,
-		clientFactory:                provider.ComputeClientFactory,
+		cloud:                              provider,
+		lockMap:                            newLockMap(),
+		AttachDetachInitialDelayInMs:       defaultAttachDetachInitialDelayInMs,
+		DetachOperationMinTimeoutInSeconds: defaultDetachOperationMinTimeoutInSeconds,
+		clientFactory:                      provider.ComputeClientFactory,
 	}
 	getter := func(_ context.Context, _ string) (interface{}, error) { return nil, nil }
 	common.hitMaxDataDiskCountCache, _ = azcache.NewTimedCache(5*time.Minute, getter, false)
@@ -160,6 +161,8 @@ func (c *ManagedDiskController) CreateManagedDisk(ctx context.Context, options *
 
 	if options.PublicNetworkAccess != "" {
 		diskProperties.PublicNetworkAccess = to.Ptr(options.PublicNetworkAccess)
+	} else {
+		diskProperties.PublicNetworkAccess = to.Ptr(armcompute.PublicNetworkAccessDisabled)
 	}
 
 	if options.NetworkAccessPolicy != "" {
@@ -174,6 +177,8 @@ func (c *ManagedDiskController) CreateManagedDisk(ctx context.Context, options *
 				return "", fmt.Errorf("DiskAccessID(%s) must be empty when NetworkAccessPolicy(%s) is not AllowPrivate", *options.DiskAccessID, options.NetworkAccessPolicy)
 			}
 		}
+	} else {
+		diskProperties.NetworkAccessPolicy = to.Ptr(armcompute.NetworkAccessPolicyDenyAll)
 	}
 
 	if diskSku == armcompute.DiskStorageAccountTypesUltraSSDLRS || diskSku == armcompute.DiskStorageAccountTypesPremiumV2LRS {
