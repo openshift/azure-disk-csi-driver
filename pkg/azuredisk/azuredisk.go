@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -43,6 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/mount-utils"
@@ -61,8 +63,6 @@ import (
 )
 
 var (
-	useDriverV2 = flag.Bool("temp-use-driver-v2", false, "A temporary flag to enable early test and development of Azure Disk CSI Driver V2. This will be removed in the future.")
-
 	// taintRemovalBackoff is the exponential backoff configuration for node taint removal
 	taintRemovalBackoff = wait.Backoff{
 		Duration: 500 * time.Millisecond,
@@ -84,8 +84,8 @@ type hostUtil interface {
 	PathIsDevice(string) (bool, error)
 }
 
-// DriverCore contains fields common to both the V1 and V2 driver, and implements all interfaces of CSI drivers
-type DriverCore struct {
+// Driver is the implementation of the Azure Disk CSI Driver.
+type Driver struct {
 	csicommon.CSIDriver
 	// Embed UnimplementedXXXServer to ensure the driver returns Unimplemented for any
 	// new RPC methods that might be introduced in future versions of the spec.
@@ -93,67 +93,68 @@ type DriverCore struct {
 	csi.UnimplementedIdentityServer
 	csi.UnimplementedNodeServer
 
-	perfOptimizationEnabled      bool
-	cloudConfigSecretName        string
-	cloudConfigSecretNamespace   string
-	customUserAgent              string
-	userAgentSuffix              string
-	cloud                        *azure.Cloud
-	clientFactory                azclient.ClientFactory
-	diskController               *ManagedDiskController
-	mounter                      *mount.SafeFormatAndMount
-	deviceHelper                 optimization.Interface
-	nodeInfo                     *optimization.NodeInfo
-	ioHandler                    azureutils.IOHandler
-	hostUtil                     hostUtil
-	useCSIProxyGAInterface       bool
-	enableDiskOnlineResize       bool
-	allowEmptyCloudConfig        bool
-	enableListVolumes            bool
-	enableListSnapshots          bool
-	supportZone                  bool
-	getNodeInfoFromLabels        bool
-	enableDiskCapacityCheck      bool
-	enableTrafficManager         bool
-	trafficManagerPort           int64
-	vmssCacheTTLInSeconds        int64
-	volStatsCacheExpireInMinutes int64
-	attachDetachInitialDelayInMs int64
-	getDiskTimeoutInSeconds      int64
-	vmType                       string
-	enableWindowsHostProcess     bool
-	useWinCIMAPI                 bool
-	getNodeIDFromIMDS            bool
-	enableOtelTracing            bool
-	shouldWaitForSnapshotReady   bool
-	checkDiskLUNCollision        bool
-	checkDiskCountForBatching    bool
-	forceDetachBackoff           bool
-	waitForDetach                bool
-	endpoint                     string
-	disableAVSetNodes            bool
-	removeNotReadyTaint          bool
-	kubeClient                   kubernetes.Interface
+	perfOptimizationEnabled            bool
+	cloudConfigSecretName              string
+	cloudConfigSecretNamespace         string
+	customUserAgent                    string
+	userAgentSuffix                    string
+	cloud                              *azure.Cloud
+	clientFactory                      azclient.ClientFactory
+	diskController                     *ManagedDiskController
+	eventRecorder                      record.EventRecorder
+	migrationMonitor                   *MigrationProgressMonitor
+	mounter                            *mount.SafeFormatAndMount
+	deviceHelper                       optimization.Interface
+	nodeInfo                           *optimization.NodeInfo
+	ioHandler                          azureutils.IOHandler
+	hostUtil                           hostUtil
+	useCSIProxyGAInterface             bool
+	enableDiskOnlineResize             bool
+	allowEmptyCloudConfig              bool
+	enableListVolumes                  bool
+	enableListSnapshots                bool
+	supportZone                        bool
+	getNodeInfoFromLabels              bool
+	enableDiskCapacityCheck            bool
+	enableTrafficManager               bool
+	trafficManagerPort                 int64
+	vmssCacheTTLInSeconds              int64
+	listVMSSWithInstanceView           bool
+	volStatsCacheExpireInMinutes       int64
+	attachDetachInitialDelayInMs       int64
+	DetachOperationMinTimeoutInSeconds int64
+	getDiskTimeoutInSeconds            int64
+	vmType                             string
+	enableWindowsHostProcess           bool
+	useWinCIMAPI                       bool
+	getNodeIDFromIMDS                  bool
+	enableOtelTracing                  bool
+	shouldWaitForSnapshotReady         bool
+	checkDiskLUNCollision              bool
+	checkDiskCountForBatching          bool
+	forceDetachBackoff                 bool
+	waitForDetach                      bool
+	endpoint                           string
+	disableAVSetNodes                  bool
+	removeNotReadyTaint                bool
+	neverStopTaintRemoval              bool
+	kubeClient                         kubernetes.Interface
 	// a timed cache storing volume stats <volumeID, volumeStats>
 	volStatsCache           azcache.Resource
 	maxConcurrentFormat     int64
 	concurrentFormatTimeout int64
 	enableMinimumRetryAfter bool
-}
-
-// Driver is the v1 implementation of the Azure Disk CSI Driver.
-type Driver struct {
-	DriverCore
-	volumeLocks *volumehelper.VolumeLocks
+	volumeLocks             *volumehelper.VolumeLocks
 	// a timed cache for throttling
 	throttlingCache azcache.Resource
 	// a timed cache for disk lun collision check throttling
 	checkDiskLunThrottlingCache azcache.Resource
+	enableMigrationMonitor      bool
 }
 
-// newDriverV1 Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
+// NewDriver Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
 // does not support optional driver plugin info manifest field. Refer to CSI spec for more details.
-func newDriverV1(options *DriverOptions) *Driver {
+func NewDriver(options *DriverOptions) *Driver {
 	driver := Driver{}
 	driver.Name = options.DriverName
 	driver.Version = driverVersion
@@ -174,9 +175,11 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.getNodeInfoFromLabels = options.GetNodeInfoFromLabels
 	driver.enableDiskCapacityCheck = options.EnableDiskCapacityCheck
 	driver.attachDetachInitialDelayInMs = options.AttachDetachInitialDelayInMs
+	driver.DetachOperationMinTimeoutInSeconds = options.DetachOperationMinTimeoutInSeconds
 	driver.enableTrafficManager = options.EnableTrafficManager
 	driver.trafficManagerPort = options.TrafficManagerPort
 	driver.vmssCacheTTLInSeconds = options.VMSSCacheTTLInSeconds
+	driver.listVMSSWithInstanceView = options.ListVMSSWithInstanceView
 	driver.volStatsCacheExpireInMinutes = options.VolStatsCacheExpireInMinutes
 	driver.getDiskTimeoutInSeconds = options.GetDiskTimeoutInSeconds
 	driver.vmType = options.VMType
@@ -192,12 +195,14 @@ func newDriverV1(options *DriverOptions) *Driver {
 	driver.endpoint = options.Endpoint
 	driver.disableAVSetNodes = options.DisableAVSetNodes
 	driver.removeNotReadyTaint = options.RemoveNotReadyTaint
+	driver.neverStopTaintRemoval = options.NeverStopTaintRemoval
 	driver.maxConcurrentFormat = options.MaxConcurrentFormat
 	driver.concurrentFormatTimeout = options.ConcurrentFormatTimeout
 	driver.enableMinimumRetryAfter = options.EnableMinimumRetryAfter
 	driver.volumeLocks = volumehelper.NewVolumeLocks()
 	driver.ioHandler = azureutils.NewOSIOHandler()
 	driver.hostUtil = hostutil.NewHostUtil()
+	driver.enableMigrationMonitor = options.EnableMigrationMonitor
 
 	if driver.NodeID == "" {
 		// nodeid is not needed in controller component
@@ -262,6 +267,10 @@ func newDriverV1(options *DriverOptions) *Driver {
 			klog.V(2).Infof("cloud: %s, location: %s, rg: %s, VMType: %s, PrimaryScaleSetName: %s, PrimaryAvailabilitySetName: %s, DisableAvailabilitySetNodes: %v", driver.cloud.Cloud, driver.cloud.Location, driver.cloud.ResourceGroup, driver.cloud.VMType, driver.cloud.PrimaryScaleSetName, driver.cloud.PrimaryAvailabilitySetName, driver.cloud.DisableAvailabilitySetNodes)
 		}
 
+		klog.V(2).Infof("vmssCacheTTLInSeconds: %d, listVMSSWithInstanceView: %v",
+			driver.vmssCacheTTLInSeconds, driver.listVMSSWithInstanceView)
+		driver.cloud.ListVmssVirtualMachinesWithoutInstanceView = !driver.listVMSSWithInstanceView
+
 		if driver.vmssCacheTTLInSeconds > 0 {
 			klog.V(2).Infof("reset vmssCacheTTLInSeconds as %d", driver.vmssCacheTTLInSeconds)
 			driver.cloud.VMCacheTTLInSeconds = int(driver.vmssCacheTTLInSeconds)
@@ -273,6 +282,33 @@ func newDriverV1(options *DriverOptions) *Driver {
 		driver.diskController.ForceDetachBackoff = driver.forceDetachBackoff
 		driver.diskController.WaitForDetach = driver.waitForDetach
 		driver.diskController.CheckDiskCountForBatching = driver.checkDiskCountForBatching
+		driver.diskController.DetachOperationMinTimeoutInSeconds = int(driver.DetachOperationMinTimeoutInSeconds)
+		klog.V(2).Infof("set DetachOperationMinTimeoutInSeconds as %d", driver.diskController.DetachOperationMinTimeoutInSeconds)
+		if driver.diskController.DetachOperationMinTimeoutInSeconds <= 0 {
+			klog.V(2).Infof("reset DetachOperationMinTimeoutInSeconds as %d", defaultDetachOperationMinTimeoutInSeconds)
+			driver.diskController.DetachOperationMinTimeoutInSeconds = defaultDetachOperationMinTimeoutInSeconds
+		}
+
+		if kubeClient != nil && driver.NodeID == "" && driver.enableMigrationMonitor {
+			eventBroadcaster := record.NewBroadcaster()
+			eventBroadcaster.StartStructuredLogging(0)
+			eventBroadcaster.StartRecordingToSink(&clientcorev1.EventSinkImpl{
+				Interface: kubeClient.CoreV1().Events(""),
+			})
+			eventRecorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{
+				Component: driver.Name,
+			})
+			driver.eventRecorder = eventRecorder
+			driver.migrationMonitor = NewMigrationProgressMonitor(kubeClient, eventRecorder, driver.diskController)
+
+			// Recover any ongoing migrations after restart
+			go func() {
+				time.Sleep(30 * time.Second) // Wait for controller to fully start
+				if err := driver.recoverMigrationMonitorsFromLabels(context.Background()); err != nil {
+					klog.Errorf("Failed to recover migration monitors: %v", err)
+				}
+			}()
+		}
 	}
 
 	driver.deviceHelper = optimization.NewSafeDeviceHelper()
@@ -324,7 +360,7 @@ func newDriverV1(options *DriverOptions) *Driver {
 		// Remove taint from node to indicate driver startup success
 		// This is done at the last possible moment to prevent race conditions or false positive removals
 		time.AfterFunc(time.Duration(options.TaintRemovalInitialDelayInSeconds)*time.Second, func() {
-			removeTaintInBackground(kubeClient, driver.NodeID, driver.Name, taintRemovalBackoff, removeNotReadyTaint)
+			removeTaintInBackground(kubeClient, driver.NodeID, driver.Name, taintRemovalBackoff, driver.neverStopTaintRemoval, removeNotReadyTaint)
 		})
 	}
 	return &driver
@@ -366,6 +402,12 @@ func (d *Driver) Run(ctx context.Context) error {
 	go func() {
 		//graceful shutdown
 		<-ctx.Done()
+
+		// Stop migration monitor if it exists
+		if d.migrationMonitor != nil {
+			d.migrationMonitor.Stop()
+		}
+
 		s.GracefulStop()
 	}()
 	// Driver d act as IdentityServer, ControllerServer and NodeServer
@@ -431,76 +473,76 @@ func (d *Driver) getVolumeLocks() *volumehelper.VolumeLocks {
 }
 
 // setControllerCapabilities sets the controller capabilities field. It is intended for use with unit tests.
-func (d *DriverCore) setControllerCapabilities(caps []*csi.ControllerServiceCapability) {
+func (d *Driver) setControllerCapabilities(caps []*csi.ControllerServiceCapability) {
 	d.Cap = caps
 }
 
 // setNodeCapabilities sets the node capabilities field. It is intended for use with unit tests.
-func (d *DriverCore) setNodeCapabilities(nodeCaps []*csi.NodeServiceCapability) {
+func (d *Driver) setNodeCapabilities(nodeCaps []*csi.NodeServiceCapability) {
 	d.NSCap = nodeCaps
 }
 
 // setName sets the Name field. It is intended for use with unit tests.
-func (d *DriverCore) setName(name string) {
+func (d *Driver) setName(name string) {
 	d.Name = name
 }
 
 // setName sets the NodeId field. It is intended for use with unit tests.
-func (d *DriverCore) setNodeID(nodeID string) {
+func (d *Driver) setNodeID(nodeID string) {
 	d.NodeID = nodeID
 }
 
 // setName sets the Version field. It is intended for use with unit tests.
-func (d *DriverCore) setVersion(version string) {
+func (d *Driver) setVersion(version string) {
 	d.Version = version
 }
 
 // getCloud returns the value of the cloud field. It is intended for use with unit tests.
-func (d *DriverCore) getCloud() *azure.Cloud {
+func (d *Driver) getCloud() *azure.Cloud {
 	return d.cloud
 }
 
 // setCloud sets the cloud field. It is intended for use with unit tests.
-func (d *DriverCore) setCloud(cloud *azure.Cloud) {
+func (d *Driver) setCloud(cloud *azure.Cloud) {
 	d.cloud = cloud
 }
 
 // getMounter returns the value of the mounter field. It is intended for use with unit tests.
-func (d *DriverCore) getMounter() *mount.SafeFormatAndMount {
+func (d *Driver) getMounter() *mount.SafeFormatAndMount {
 	return d.mounter
 }
 
 // setMounter sets the mounter field. It is intended for use with unit tests.
-func (d *DriverCore) setMounter(mounter *mount.SafeFormatAndMount) {
+func (d *Driver) setMounter(mounter *mount.SafeFormatAndMount) {
 	d.mounter = mounter
 }
 
 // getPerfOptimizationEnabled returns the value of the perfOptimizationEnabled field. It is intended for use with unit tests.
-func (d *DriverCore) getPerfOptimizationEnabled() bool {
+func (d *Driver) getPerfOptimizationEnabled() bool {
 	return d.perfOptimizationEnabled
 }
 
 // setPerfOptimizationEnabled sets the value of the perfOptimizationEnabled field. It is intended for use with unit tests.
-func (d *DriverCore) setPerfOptimizationEnabled(enabled bool) {
+func (d *Driver) setPerfOptimizationEnabled(enabled bool) {
 	d.perfOptimizationEnabled = enabled
 }
 
 // getDeviceHelper returns the value of the deviceHelper field. It is intended for use with unit tests.
-func (d *DriverCore) getDeviceHelper() optimization.Interface {
+func (d *Driver) getDeviceHelper() optimization.Interface {
 	return d.deviceHelper
 }
 
 // getNodeInfo returns the value of the nodeInfo field. It is intended for use with unit tests.
-func (d *DriverCore) getNodeInfo() *optimization.NodeInfo {
+func (d *Driver) getNodeInfo() *optimization.NodeInfo {
 	return d.nodeInfo
 }
 
-func (d *DriverCore) getHostUtil() hostUtil {
+func (d *Driver) getHostUtil() hostUtil {
 	return d.hostUtil
 }
 
 // getSnapshotCompletionPercent returns the completion percent of snapshot
-func (d *DriverCore) getSnapshotCompletionPercent(ctx context.Context, subsID, resourceGroup, snapshotName string) (float32, error) {
+func (d *Driver) getSnapshotCompletionPercent(ctx context.Context, subsID, resourceGroup, snapshotName string) (float32, error) {
 	snapshotClient, err := d.clientFactory.GetSnapshotClientForSub(subsID)
 	if err != nil {
 		return 0.0, err
@@ -520,7 +562,7 @@ func (d *DriverCore) getSnapshotCompletionPercent(ctx context.Context, subsID, r
 }
 
 // waitForSnapshotReady wait for completionPercent of snapshot is 100.0
-func (d *DriverCore) waitForSnapshotReady(ctx context.Context, subsID, resourceGroup, snapshotName string, intervel, timeout time.Duration) error {
+func (d *Driver) waitForSnapshotReady(ctx context.Context, subsID, resourceGroup, snapshotName string, intervel, timeout time.Duration) error {
 	completionPercent, err := d.getSnapshotCompletionPercent(ctx, subsID, resourceGroup, snapshotName)
 	if err != nil {
 		return err
@@ -553,7 +595,7 @@ func (d *DriverCore) waitForSnapshotReady(ctx context.Context, subsID, resourceG
 }
 
 // getUsedLunsFromVolumeAttachments returns a list of used luns from VolumeAttachments
-func (d *DriverCore) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeName string) ([]int, error) {
+func (d *Driver) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeName string) ([]int, error) {
 	kubeClient := d.cloud.KubeClient
 	if kubeClient == nil || kubeClient.StorageV1() == nil || kubeClient.StorageV1().VolumeAttachments() == nil {
 		return nil, fmt.Errorf("kubeClient or kubeClient.StorageV1() or kubeClient.StorageV1().VolumeAttachments() is nil")
@@ -590,7 +632,7 @@ func (d *DriverCore) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeN
 }
 
 // getUsedLunsFromNode returns a list of sorted used luns from Node
-func (d *DriverCore) getUsedLunsFromNode(ctx context.Context, nodeName types.NodeName) ([]int, error) {
+func (d *Driver) getUsedLunsFromNode(ctx context.Context, nodeName types.NodeName) ([]int, error) {
 	disks, _, err := d.diskController.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %s: %v", nodeName, err)
@@ -680,18 +722,26 @@ type JSONPatch struct {
 }
 
 // removeTaintInBackground is a goroutine that retries removeNotReadyTaint with exponential backoff
-func removeTaintInBackground(k8sClient kubernetes.Interface, nodeName, driverName string, backoff wait.Backoff, removalFunc func(kubernetes.Interface, string, string) error) {
+func removeTaintInBackground(k8sClient clientset.Interface, nodeName, driverName string, backoff wait.Backoff, neverStop bool, removalFunc func(clientset.Interface, string, string) error) {
 	backoffErr := wait.ExponentialBackoff(backoff, func() (bool, error) {
-		err := removalFunc(k8sClient, nodeName, driverName)
-		if err != nil {
-			klog.ErrorS(err, "Unexpected failure when attempting to remove node taint(s)")
+		if err := removalFunc(k8sClient, nodeName, driverName); err != nil {
+			klog.Errorf("taint removal returned with error: %v", err)
 			return false, nil
 		}
 		return true, nil
 	})
 
-	if backoffErr != nil {
-		klog.ErrorS(backoffErr, "Retries exhausted, giving up attempting to remove node taint(s)")
+	klog.Errorf("taint removal returned with error: %v", backoffErr)
+	if neverStop {
+		klog.V(2).Infof("Starting taint removal loop, will retry indefinitely")
+		for {
+			klog.V(6).Infof("Waiting for around 5 minutes before retrying taint removal")
+			time.Sleep(4*time.Minute + wait.Jitter(time.Minute, 1.0))
+			if err := removalFunc(k8sClient, nodeName, driverName); err != nil {
+				klog.Errorf("taint removal returned with error: %v", err)
+				return
+			}
+		}
 	}
 }
 
@@ -710,10 +760,10 @@ func removeNotReadyTaint(clientset kubernetes.Interface, nodeName, driverName st
 	}
 
 	taintKeyToRemove := driverName + consts.AgentNotReadyNodeTaintKeySuffix
-	klog.V(2).Infof("removing taint with key %s from local node %s", taintKeyToRemove, nodeName)
+	klog.V(6).Infof("removing taint with key %s from local node %s", taintKeyToRemove, nodeName)
 	var taintsToKeep []corev1.Taint
 	for _, taint := range node.Spec.Taints {
-		klog.V(5).Infof("checking taint key %s, value %s, effect %s", taint.Key, taint.Value, taint.Effect)
+		klog.V(6).Infof("checking taint key %s, value %s, effect %s", taint.Key, taint.Value, taint.Effect)
 		if taint.Key != taintKeyToRemove {
 			taintsToKeep = append(taintsToKeep, taint)
 		} else {
@@ -722,7 +772,7 @@ func removeNotReadyTaint(clientset kubernetes.Interface, nodeName, driverName st
 	}
 
 	if len(taintsToKeep) == len(node.Spec.Taints) {
-		klog.V(2).Infof("No taints to remove on node, skipping taint removal")
+		klog.V(6).Infof("No taints to remove on node, skipping taint removal")
 		return nil
 	}
 
@@ -761,7 +811,7 @@ func checkAllocatable(ctx context.Context, clientset kubernetes.Interface, nodeN
 	for _, driver := range csiNode.Spec.Drivers {
 		if driver.Name == driverName {
 			if driver.Allocatable != nil && driver.Allocatable.Count != nil {
-				klog.V(2).Infof("CSINode Allocatable value is set for driver on node %s, count %d", nodeName, *driver.Allocatable.Count)
+				klog.V(6).Infof("CSINode Allocatable value is set for driver on node %s, count %d", nodeName, *driver.Allocatable.Count)
 				return nil
 			}
 			return fmt.Errorf("isAllocatableSet: allocatable value not set for driver on node %s", nodeName)

@@ -135,10 +135,8 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 
 		if isMultiZone && !isUsingInTreeVolumePlugin && !isCapzTest {
 			test.StorageClassParameters = map[string]string{
-				"skuName":           "UltraSSD_LRS",
-				"cachingmode":       "None",
-				"logicalSectorSize": "512",
-				"zoned":             "true",
+				"skuName":     "StandardSSD_LRS",
+				"cachingmode": "None",
 			}
 		}
 		if isUsingInTreeVolumePlugin {
@@ -217,6 +215,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 				"userAgent":             "azuredisk-e2e-test",
 				"enableAsyncAttach":     "false",
 				"enablePerformancePlus": "true",
+				"diskName":              "${pvc.metadata.namespace}-${pvc.metadata.name}-${pv.metadata.name}",
 			},
 		}
 		test.Run(ctx, cs, ns)

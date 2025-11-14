@@ -56,6 +56,9 @@ const (
 	PvcNamespaceTag                   = "kubernetes.io-created-for-pvc-namespace"
 	PvcNameTag                        = "kubernetes.io-created-for-pvc-name"
 	PvNameTag                         = "kubernetes.io-created-for-pv-name"
+	PvcMetaDataName                   = "${pvc.metadata.name}"
+	PvcMetaDataNamespace              = "${pvc.metadata.namespace}"
+	PvMetaDataName                    = "${pv.metadata.name}"
 	SnapshotNamespaceTag              = "kubernetes.io-created-for-snapshot-namespace"
 	SnapshotNameTag                   = "kubernetes.io-created-for-snapshot-name"
 	PvNameKey                         = "csi.storage.k8s.io/pv/name"
@@ -111,6 +114,7 @@ const (
 
 var (
 	// ManagedDiskPath is described here: https://docs.microsoft.com/en-us/rest/api/compute/disks/createorupdate#create-a-managed-disk-from-an-existing-managed-disk-in-the-same-or-different-subscription.
-	ManagedDiskPath   = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/disks/%s"
-	ManagedDiskPathRE = regexp.MustCompile(`(?i).*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/disks/(.+)`)
+	ManagedDiskPath    = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/disks/%s"
+	ManagedDiskPathRE  = regexp.MustCompile(`(?i).*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/disks/(.+)`)
+	DiskSnapshotPathRE = regexp.MustCompile(`(?i).*/subscriptions/(?:.*)/resourceGroups/(?:.*)/providers/Microsoft.Compute/snapshots/(.+)`)
 )
