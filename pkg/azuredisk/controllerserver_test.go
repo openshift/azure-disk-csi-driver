@@ -36,8 +36,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -353,7 +356,9 @@ func TestCreateVolume(t *testing.T) {
 					SKU: &armcompute.SnapshotSKU{
 						Name: ptr.To(armcompute.SnapshotStorageAccountTypesStandardZRS),
 					},
-					Properties: &armcompute.SnapshotProperties{},
+					Properties: &armcompute.SnapshotProperties{
+						DiskSizeBytes: ptr.To(int64(1073741824)), // 1GB in bytes
+					},
 				}, nil).AnyTimes()
 				_, err := d.CreateVolume(context.Background(), req)
 				expectedErr := status.Errorf(codes.Internal, "test")
@@ -380,7 +385,9 @@ func TestCreateVolume(t *testing.T) {
 					VolumeContentSource: &volumecontensource,
 				}
 				disk := &armcompute.Disk{
-					Properties: &armcompute.DiskProperties{},
+					Properties: &armcompute.DiskProperties{
+						DiskSizeBytes: ptr.To(int64(1073741824)), // 1GB in bytes
+					},
 				}
 				diskClient := mock_diskclient.NewMockInterface(cntl)
 				d.getClientFactory().(*mock_azclient.MockClientFactory).EXPECT().GetDiskClientForSub(gomock.Any()).Return(diskClient, nil).AnyTimes()
@@ -683,6 +690,7 @@ func TestCreateVolume_SnapshotPremiumLRS_ToPremiumV2_EmitsMigrationEvents(t *tes
 		},
 		Properties: &armcompute.SnapshotProperties{
 			DiskSizeGB:        &sizeGB,
+			DiskSizeBytes:     ptr.To(int64(1073741824)), // 1GB in bytes
 			ProvisioningState: &provState,
 		},
 	}, nil).AnyTimes()
@@ -794,6 +802,254 @@ collect:
 
 	if !hasStart || !hasProgress || !hasCompleted {
 		t.Fatalf("expected start+progress+completed events, got: %v", events)
+	}
+
+	d.GetMigrationMonitor().Stop()
+}
+
+func TestCreateVolume_RecoveryLoopStartsMigrationAfterInitialMonitorUnavailable(t *testing.T) {
+	origInterval := migrationCheckInterval
+	defer func() { migrationCheckInterval = origInterval }()
+	migrationCheckInterval = 25 * time.Millisecond
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	d := getFakeDriverWithKubeClient(ctrl)
+	// Simulate transient unavailability – monitor not ready at provisioning time
+	d.SetMigrationMonitor(nil)
+
+	snapshotID := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap-recov1"
+	volName := "pv-recover-transient-start"
+	sizeGi := int64(10)
+	capBytes := sizeGi * 1024 * 1024 * 1024
+	diskURI := fmt.Sprintf("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/%s", volName)
+
+	// Mock disk & snapshot clients
+	diskClient := mock_diskclient.NewMockInterface(ctrl)
+	d.getClientFactory().(*mock_azclient.MockClientFactory).EXPECT().
+		GetDiskClientForSub(gomock.Any()).Return(diskClient, nil).AnyTimes()
+
+	snapshotClient := mock_snapshotclient.NewMockInterface(ctrl)
+	d.getClientFactory().(*mock_azclient.MockClientFactory).EXPECT().
+		GetSnapshotClientForSub(gomock.Any()).
+		Return(snapshotClient, nil).AnyTimes()
+
+	// Snapshot SKU (source = Premium_LRS)
+	snapshotClient.EXPECT().Get(gomock.Any(), "rg", "snap-recov1").Return(
+		&armcompute.Snapshot{
+			Name: to.Ptr("snap-recov1"),
+			SKU:  &armcompute.SnapshotSKU{Name: to.Ptr(armcompute.SnapshotStorageAccountTypesPremiumLRS)},
+			Properties: &armcompute.SnapshotProperties{
+				CreationData: &armcompute.CreationData{},
+			},
+		}, nil).AnyTimes()
+
+	// Track creation & progress
+	var createDone atomic.Bool
+	var progressPolls atomic.Int32
+
+	// GET behavior:
+	//  - Before CreateOrUpdate: return NotFound
+	//  - After CreateOrUpdate: return disk with ProvisioningState=Succeeded and evolving CompletionPercent
+	diskClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ string) (*armcompute.Disk, error) {
+			if !createDone.Load() {
+				// Simulate disk not existing yet
+				return nil, apierrors.NewInternalError(fmt.Errorf("transient error"))
+			}
+			p := progressPolls.Add(1)
+			var pct float32
+			if p >= 5 {
+				pct = 100
+			} else {
+				pct = 0
+			}
+			return &armcompute.Disk{
+				ID:  to.Ptr(diskURI),
+				SKU: &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypesPremiumLRS)},
+				Properties: &armcompute.DiskProperties{
+					DiskSizeGB:        to.Ptr[int32](int32(sizeGi)),
+					ProvisioningState: to.Ptr("Succeeded"),
+					CompletionPercent: to.Ptr(pct),
+				},
+			}, nil
+		}).AnyTimes()
+
+	// CreateOrUpdate sets createDone
+	diskClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ string, _ armcompute.Disk) (*armcompute.Disk, error) {
+			return &armcompute.Disk{
+				ID:  to.Ptr(diskURI),
+				SKU: &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypesPremiumLRS)},
+				Properties: &armcompute.DiskProperties{
+					DiskSizeGB:        to.Ptr[int32](int32(sizeGi)),
+					ProvisioningState: to.Ptr("Succeeded"),
+				},
+			}, nil
+		}).Times(1)
+
+	// Patch used during migration monitor after recovery
+	diskClient.EXPECT().Patch(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&armcompute.Disk{
+			ID:  to.Ptr(diskURI),
+			SKU: &armcompute.DiskSKU{Name: to.Ptr(armcompute.DiskStorageAccountTypesPremiumV2LRS)},
+		}, nil).AnyTimes()
+
+	req := &csi.CreateVolumeRequest{
+		Name: volName,
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: capBytes,
+		},
+		Parameters: map[string]string{
+			consts.SkuNameField: string(armcompute.DiskStorageAccountTypesPremiumV2LRS),
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{
+			{
+				AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+				AccessMode: &csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+				},
+			},
+		},
+		VolumeContentSource: &csi.VolumeContentSource{
+			Type: &csi.VolumeContentSource_Snapshot{
+				Snapshot: &csi.VolumeContentSource_SnapshotSource{
+					SnapshotId: snapshotID,
+				},
+			},
+		},
+	}
+
+	_, err := d.CreateVolume(context.Background(), req)
+	assert.NoError(t, err, "CreateVolume should succeed")
+	assert.True(t, d.GetMigrationMonitor().IsMigrationActive(diskURI), "Migration for volume %s should be active", diskURI)
+
+	// Simulate restart
+	d.GetMigrationMonitor().Stop()
+	// Ensure cleanup (task removed)
+	cleanupDeadline := time.Now().Add(1 * time.Second)
+	for {
+		if !d.GetMigrationMonitor().IsMigrationActive(diskURI) {
+			break
+		}
+		if time.Now().After(cleanupDeadline) {
+			t.Fatalf("Migration task still active after completion")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	createDone.Store(true)
+
+	eventRecorder := record.NewFakeRecorder(100)
+	d.SetMigrationMonitor(NewMigrationProgressMonitor(d.getCloud().KubeClient, eventRecorder, d.GetDiskController()))
+
+	// Prepare labeled PV/PVC for recovery
+	coreMock := d.getCloud().KubeClient.CoreV1().(*mockcorev1.MockInterface)
+	pvIf := d.getCloud().KubeClient.CoreV1().PersistentVolumes().(*mockpersistentvolume.MockInterface)
+	pvcIf := mockpersistentvolumeclaim.NewMockPersistentVolumeClaimInterface(ctrl)
+	coreMock.EXPECT().PersistentVolumeClaims(gomock.Any()).Return(pvcIf).AnyTimes()
+
+	pvcName := "pvc-" + volName
+	ns := "default"
+
+	pv := &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: volName,
+			Labels: map[string]string{
+				LabelMigrationInProgress: "true",
+			},
+		},
+		Spec: v1.PersistentVolumeSpec{
+			Capacity: v1.ResourceList{
+				v1.ResourceName("storage"): *resource.NewQuantity(capBytes, resource.BinarySI),
+			},
+			ClaimRef: &v1.ObjectReference{Name: pvcName, Namespace: ns},
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver:       "disk.csi.azure.com",
+					VolumeHandle: diskURI,
+					VolumeAttributes: map[string]string{
+						"storageAccountType": string(armcompute.DiskStorageAccountTypesPremiumV2LRS),
+						"skuName":            string(armcompute.DiskStorageAccountTypesPremiumV2LRS),
+					},
+				},
+			},
+		},
+	}
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: ns},
+		Spec:       v1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+
+	pvIf.EXPECT().List(gomock.Any(), gomock.Any()).
+		Return(&v1.PersistentVolumeList{Items: []v1.PersistentVolume{*pv}}, nil).AnyTimes()
+	pvIf.EXPECT().Get(gomock.Any(), pv.Name, gomock.Any()).
+		Return(pv.DeepCopy(), nil).AnyTimes()
+	pvIf.EXPECT().Update(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, updated *v1.PersistentVolume, _ metav1.UpdateOptions) (*v1.PersistentVolume, error) {
+			return updated, nil
+		}).AnyTimes()
+	pvcIf.EXPECT().Get(gomock.Any(), pvc.Name, gomock.Any()).
+		Return(pvc.DeepCopy(), nil).AnyTimes()
+
+	// Accelerated recovery loop (instead of 30s + 10m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				_ = d.RecoverMigrationMonitor(context.Background())
+				time.Sleep(40 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Wait for migration activation
+	activateDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if d.GetMigrationMonitor().IsMigrationActive(diskURI) {
+			break
+		}
+		if time.Now().After(activateDeadline) {
+			t.Fatalf("Migration did not activate via recovery")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Collect events until Started & Completed
+	foundStart, foundCompletion := false, false
+	timeout := time.After(6 * time.Second)
+	for !(foundStart && foundCompletion) {
+		select {
+		case e := <-eventRecorder.Events:
+			if strings.Contains(e, ReasonSKUMigrationStarted) {
+				foundStart = true
+			}
+			if strings.Contains(e, ReasonSKUMigrationCompleted) {
+				foundCompletion = true
+			}
+		case <-timeout:
+			t.Fatalf("Timed out waiting for migration start/completion (start=%v completion=%v)", foundStart, foundCompletion)
+		case <-time.After(30 * time.Millisecond):
+		}
+	}
+
+	assert.True(t, foundStart, "Expected migration start event")
+	assert.True(t, foundCompletion, "Expected migration completion event")
+
+	// Ensure cleanup (task removed)
+	cleanupDeadline = time.Now().Add(1 * time.Second)
+	for {
+		if !d.GetMigrationMonitor().IsMigrationActive(diskURI) {
+			break
+		}
+		if time.Now().After(cleanupDeadline) {
+			t.Fatalf("Migration task still active after completion")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	d.GetMigrationMonitor().Stop()
@@ -2337,6 +2593,50 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 			},
 		},
 		{
+			name: "invalid network access policy ",
+			testFunc: func(t *testing.T) {
+				parameter := make(map[string]string)
+				parameter["networkaccesspolicy"] = "Invalid"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "snapname",
+					Parameters:     parameter,
+				}
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := fakeDriverFn(cntl)
+				d.setCloud(&azure.Cloud{})
+
+				_, err := d.CreateSnapshot(context.Background(), req)
+				expectedErr := status.Errorf(codes.InvalidArgument, "azureDisk - Invalid is not supported NetworkAccessPolicy. Supported values are [AllowAll AllowPrivate DenyAll]")
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
+			name: "invalid publicNetworkAccess ",
+			testFunc: func(t *testing.T) {
+				parameter := make(map[string]string)
+				parameter["publicnetworkaccess"] = "Invalid"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "snapname",
+					Parameters:     parameter,
+				}
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := fakeDriverFn(cntl)
+				d.setCloud(&azure.Cloud{})
+
+				_, err := d.CreateSnapshot(context.Background(), req)
+				expectedErr := status.Errorf(codes.InvalidArgument, "azureDisk - Invalid is not supported PublicNetworkAccess. Supported values are [Disabled Enabled]")
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
 			name: "cross region non-incremental error ",
 			testFunc: func(t *testing.T) {
 				parameter := make(map[string]string)
@@ -2823,6 +3123,7 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 			testFunc: func(t *testing.T) {
 				parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
+				parameter["publicNetworkAccess"] = "Enabled"
 				req := &csi.CreateSnapshotRequest{
 					SourceVolumeId: testVolumeID,
 					Name:           "testurl/subscriptions/23/providers/Microsoft.Compute/snapshots/snapshot-name",
@@ -2874,6 +3175,8 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 				parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["dataaccessauthmode"] = "None"
+				parameter["networkAccessPolicy"] = "AllowAll"
+				parameter["publicNetworkAccess"] = "Enabled"
 				parameter["tagvaluedelimiter"] = ","
 				parameter["useragent"] = "ut"
 				parameter["csi.storage.k8s.io/volumesnapshot/name"] = "VolumeSnapshotNameKeyPlaceholder"
@@ -2982,6 +3285,7 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 				parameter := make(map[string]string)
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
+				parameter["networkAccessPolicy"] = "AllowAll"
 				req := &csi.CreateSnapshotRequest{
 					SourceVolumeId: testVolumeID,
 					Name:           "testurl/subscriptions/23/providers/Microsoft.Compute/snapshots/snapshot-name",
@@ -4133,7 +4437,7 @@ func TestGetSnapshotSKU(t *testing.T) {
 			snapshotURI:     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap",
 			expectFactory:   true,
 			expectedSKU:     "",
-			expectErrSubstr: "Snapshot property not found",
+			expectErrSubstr: "Snapshot is nil",
 			setupMocks: func(f *mock_azclient.MockClientFactory, s *mock_snapshotclient.MockInterface) {
 				f.EXPECT().GetSnapshotClientForSub("sub").Return(s, nil)
 				s.EXPECT().Get(gomock.Any(), "rg", "snap").Return(nil, nil)
@@ -4144,7 +4448,7 @@ func TestGetSnapshotSKU(t *testing.T) {
 			snapshotURI:     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap",
 			expectFactory:   true,
 			expectedSKU:     "",
-			expectErrSubstr: "Snapshot property not found",
+			expectErrSubstr: "Snapshot SKU property not found",
 			setupMocks: func(f *mock_azclient.MockClientFactory, s *mock_snapshotclient.MockInterface) {
 				f.EXPECT().GetSnapshotClientForSub("sub").Return(s, nil)
 				s.EXPECT().Get(gomock.Any(), "rg", "snap").Return(&armcompute.Snapshot{}, nil)
@@ -4155,7 +4459,7 @@ func TestGetSnapshotSKU(t *testing.T) {
 			snapshotURI:     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/snap",
 			expectFactory:   true,
 			expectedSKU:     "",
-			expectErrSubstr: "Snapshot property not found",
+			expectErrSubstr: "Snapshot SKU property not found",
 			setupMocks: func(f *mock_azclient.MockClientFactory, s *mock_snapshotclient.MockInterface) {
 				f.EXPECT().GetSnapshotClientForSub("sub").Return(s, nil)
 				s.EXPECT().Get(gomock.Any(), "rg", "snap").Return(&armcompute.Snapshot{
@@ -4182,7 +4486,11 @@ func TestGetSnapshotSKU(t *testing.T) {
 			}
 
 			invoke := func() (string, error) {
-				return d.getSnapshotSKU(context.Background(), tc.snapshotURI)
+				snapshot, err := d.getSnapshot(context.Background(), tc.snapshotURI)
+				if err != nil {
+					return "", err
+				}
+				return getSnapshotSKUFromSnapshot(snapshot)
 			}
 
 			sku, err := invoke()
@@ -4205,6 +4513,169 @@ func TestGetSnapshotSKU(t *testing.T) {
 	}
 }
 
+func TestGetSnapshotSKUFromSnapshot(t *testing.T) {
+	type testCase struct {
+		name            string
+		snapshot        *armcompute.Snapshot
+		expectedSKU     string
+		expectErrSubstr string
+		expectGRPCCode  codes.Code
+	}
+	tests := []testCase{
+		{
+			name:        "success - premium LRS",
+			expectedSKU: string(armcompute.SnapshotStorageAccountTypesPremiumLRS),
+			snapshot: &armcompute.Snapshot{
+				SKU: &armcompute.SnapshotSKU{
+					Name: to.Ptr(armcompute.SnapshotStorageAccountTypesPremiumLRS),
+				},
+			},
+		},
+		{
+			name:        "success - standard LRS",
+			expectedSKU: string(armcompute.SnapshotStorageAccountTypesStandardLRS),
+			snapshot: &armcompute.Snapshot{
+				SKU: &armcompute.SnapshotSKU{
+					Name: to.Ptr(armcompute.SnapshotStorageAccountTypesStandardLRS),
+				},
+			},
+		},
+		{
+			name:            "nil snapshot",
+			snapshot:        nil,
+			expectedSKU:     "",
+			expectErrSubstr: "Snapshot is nil",
+			expectGRPCCode:  codes.NotFound,
+		},
+		{
+			name:            "nil SKU",
+			snapshot:        &armcompute.Snapshot{},
+			expectedSKU:     "",
+			expectErrSubstr: "Snapshot SKU property not found",
+			expectGRPCCode:  codes.NotFound,
+		},
+		{
+			name: "nil SKU Name",
+			snapshot: &armcompute.Snapshot{
+				SKU: &armcompute.SnapshotSKU{Name: nil},
+			},
+			expectedSKU:     "",
+			expectErrSubstr: "Snapshot SKU property not found",
+			expectGRPCCode:  codes.NotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			sku, err := getSnapshotSKUFromSnapshot(tc.snapshot)
+
+			if tc.expectErrSubstr != "" {
+				require.Error(t, err)
+				require.Empty(t, sku)
+				require.Contains(t, err.Error(), tc.expectErrSubstr)
+				if tc.expectGRPCCode != 0 {
+					if st, ok := status.FromError(err); ok {
+						require.Equal(t, tc.expectGRPCCode, st.Code())
+					}
+				}
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.expectedSKU, sku)
+			}
+		})
+	}
+}
+
+func TestGetDiskSizeInBytesFromSnapshot(t *testing.T) {
+	type testCase struct {
+		name            string
+		snapshot        *armcompute.Snapshot
+		expectedSize    int64
+		expectErrSubstr string
+		expectGRPCCode  codes.Code
+	}
+	tests := []testCase{
+		{
+			name:         "success - 100GB disk",
+			expectedSize: 107374182400, // 100GB in bytes
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					DiskSizeBytes: to.Ptr(int64(107374182400)),
+				},
+			},
+		},
+		{
+			name:         "success - 1TB disk",
+			expectedSize: 1099511627776, // 1TB in bytes
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					DiskSizeBytes: to.Ptr(int64(1099511627776)),
+				},
+			},
+		},
+		{
+			name:         "success - small disk",
+			expectedSize: 4294967296, // 4GB in bytes
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					DiskSizeBytes: to.Ptr(int64(4294967296)),
+				},
+			},
+		},
+		{
+			name:            "nil snapshot",
+			snapshot:        nil,
+			expectedSize:    0,
+			expectErrSubstr: "Snapshot is nil",
+			expectGRPCCode:  codes.NotFound,
+		},
+		{
+			name:            "nil Properties",
+			snapshot:        &armcompute.Snapshot{},
+			expectedSize:    0,
+			expectErrSubstr: "Snapshot size not found",
+			expectGRPCCode:  codes.NotFound,
+		},
+		{
+			name: "nil DiskSizeBytes",
+			snapshot: &armcompute.Snapshot{
+				Properties: &armcompute.SnapshotProperties{
+					DiskSizeBytes: nil,
+				},
+			},
+			expectedSize:    0,
+			expectErrSubstr: "Snapshot size not found",
+			expectGRPCCode:  codes.NotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			size, err := getDiskSizeInBytesFromSnapshot(tc.snapshot)
+
+			if tc.expectErrSubstr != "" {
+				require.Error(t, err)
+				require.Equal(t, int64(0), size)
+				require.Contains(t, err.Error(), tc.expectErrSubstr)
+				if tc.expectGRPCCode != 0 {
+					if st, ok := status.FromError(err); ok {
+						require.Equal(t, tc.expectGRPCCode, st.Code())
+					}
+				}
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.expectedSize, size)
+			}
+		})
+	}
+}
+
 func getFakeDriverWithKubeClient(ctrl *gomock.Controller) FakeDriver {
 	d, _ := NewFakeDriver(ctrl)
 
@@ -4214,4 +4685,150 @@ func getFakeDriverWithKubeClient(ctrl *gomock.Controller) FakeDriver {
 	d.getCloud().KubeClient.(*mockkubeclient.MockInterface).EXPECT().CoreV1().Return(corev1).AnyTimes()
 	d.getCloud().KubeClient.CoreV1().(*mockcorev1.MockInterface).EXPECT().PersistentVolumes().Return(persistentvolume).AnyTimes()
 	return d
+}
+
+func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	d, _ := NewFakeDriver(ctrl)
+	driver := d.(*fakeDriver)
+	client := fake.NewSimpleClientset()
+	driver.getCloud().KubeClient = client
+
+	nodeName := "node-1"
+	otherNode := "node-2"
+	diskURI := testVolumeID
+	otherDiskURI := fmt.Sprintf(consts.ManagedDiskPath, "subs", "rg", "other-disk")
+	inlineDiskURI := fmt.Sprintf(consts.ManagedDiskPath, "subs", "rg", "inline-disk")
+	pvName := "pv-1"
+
+	_, err := client.CoreV1().PersistentVolumes().Create(context.Background(), &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: pvName},
+		Spec: v1.PersistentVolumeSpec{
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver:       driver.Name,
+					VolumeHandle: diskURI,
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "va-1"},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: driver.Name,
+			NodeName: nodeName,
+			Source: storagev1.VolumeAttachmentSource{
+				PersistentVolumeName: ptr.To(pvName),
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().PersistentVolumes().Create(context.Background(), &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-2"},
+		Spec: v1.PersistentVolumeSpec{
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver:       driver.Name,
+					VolumeHandle: otherDiskURI,
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "va-2"},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: driver.Name,
+			NodeName: nodeName,
+			Source: storagev1.VolumeAttachmentSource{
+				PersistentVolumeName: ptr.To("pv-2"),
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "va-inline"},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: driver.Name,
+			NodeName: otherNode,
+			Source: storagev1.VolumeAttachmentSource{
+				InlineVolumeSpec: &v1.PersistentVolumeSpec{
+					PersistentVolumeSource: v1.PersistentVolumeSource{
+						CSI: &v1.CSIPersistentVolumeSource{
+							Driver:       driver.Name,
+							VolumeHandle: diskURI,
+						},
+					},
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "va-line"},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: driver.Name,
+			NodeName: nodeName,
+			Source: storagev1.VolumeAttachmentSource{
+				InlineVolumeSpec: &v1.PersistentVolumeSpec{
+					PersistentVolumeSource: v1.PersistentVolumeSource{
+						CSI: &v1.CSIPersistentVolumeSource{
+							Driver:       driver.Name,
+							VolumeHandle: inlineDiskURI,
+						},
+					},
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	missingDiskURI := fmt.Sprintf(consts.ManagedDiskPath, "subs", "rg", "missing-disk")
+	tests := []struct {
+		name    string
+		node    string
+		diskURI string
+		want    bool
+	}{
+		{
+			name:    "returns true when VA on node matches disk",
+			node:    nodeName,
+			diskURI: diskURI,
+			want:    true,
+		},
+		{
+			name:    "returns false when no VA on node matches disk",
+			node:    nodeName,
+			diskURI: missingDiskURI,
+			want:    false,
+		},
+		{
+			name:    "ignores VA on other node",
+			node:    otherNode,
+			diskURI: otherDiskURI,
+			want:    false,
+		},
+		{
+			name:    "returns true when inline VA matches node",
+			node:    nodeName,
+			diskURI: inlineDiskURI,
+			want:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hasVA, err := driver.hasVolumeAttachmentForDiskOnNode(context.Background(), tc.node, tc.diskURI)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, hasVA)
+		})
+	}
 }

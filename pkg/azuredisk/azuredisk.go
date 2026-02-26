@@ -37,10 +37,8 @@ import (
 	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -69,6 +67,10 @@ var (
 		Factor:   2,
 		Steps:    10, // Max delay = 0.5 * 2^9 = ~4 minutes
 	}
+)
+
+const (
+	volumeAttachmentListTimeoutSeconds = 2
 )
 
 // CSIDriver defines the interface for a CSI driver.
@@ -122,7 +124,8 @@ type Driver struct {
 	listVMSSWithInstanceView           bool
 	volStatsCacheExpireInMinutes       int64
 	attachDetachInitialDelayInMs       int64
-	DetachOperationMinTimeoutInSeconds int64
+	detachOperationMinTimeoutInSeconds int64
+	vmssDetachTimeoutInSeconds         int64
 	getDiskTimeoutInSeconds            int64
 	vmType                             string
 	enableWindowsHostProcess           bool
@@ -138,7 +141,7 @@ type Driver struct {
 	disableAVSetNodes                  bool
 	removeNotReadyTaint                bool
 	neverStopTaintRemoval              bool
-	kubeClient                         kubernetes.Interface
+	kubeClient                         clientset.Interface
 	// a timed cache storing volume stats <volumeID, volumeStats>
 	volStatsCache           azcache.Resource
 	maxConcurrentFormat     int64
@@ -150,6 +153,8 @@ type Driver struct {
 	// a timed cache for disk lun collision check throttling
 	checkDiskLunThrottlingCache azcache.Resource
 	enableMigrationMonitor      bool
+	// whether to convert ReadWrite cachingMode to ReadOnly for intree PVs to avoid issues
+	convertRWCachingModeForIntreePV bool
 }
 
 // NewDriver Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
@@ -175,7 +180,8 @@ func NewDriver(options *DriverOptions) *Driver {
 	driver.getNodeInfoFromLabels = options.GetNodeInfoFromLabels
 	driver.enableDiskCapacityCheck = options.EnableDiskCapacityCheck
 	driver.attachDetachInitialDelayInMs = options.AttachDetachInitialDelayInMs
-	driver.DetachOperationMinTimeoutInSeconds = options.DetachOperationMinTimeoutInSeconds
+	driver.detachOperationMinTimeoutInSeconds = options.DetachOperationMinTimeoutInSeconds
+	driver.vmssDetachTimeoutInSeconds = options.VMSSDetachTimeoutInSeconds
 	driver.enableTrafficManager = options.EnableTrafficManager
 	driver.trafficManagerPort = options.TrafficManagerPort
 	driver.vmssCacheTTLInSeconds = options.VMSSCacheTTLInSeconds
@@ -203,6 +209,7 @@ func NewDriver(options *DriverOptions) *Driver {
 	driver.ioHandler = azureutils.NewOSIOHandler()
 	driver.hostUtil = hostutil.NewHostUtil()
 	driver.enableMigrationMonitor = options.EnableMigrationMonitor
+	driver.convertRWCachingModeForIntreePV = options.ConvertRWCachingModeForIntreePV
 
 	if driver.NodeID == "" {
 		// nodeid is not needed in controller component
@@ -282,16 +289,26 @@ func NewDriver(options *DriverOptions) *Driver {
 		driver.diskController.ForceDetachBackoff = driver.forceDetachBackoff
 		driver.diskController.WaitForDetach = driver.waitForDetach
 		driver.diskController.CheckDiskCountForBatching = driver.checkDiskCountForBatching
-		driver.diskController.DetachOperationMinTimeoutInSeconds = int(driver.DetachOperationMinTimeoutInSeconds)
+		driver.diskController.DetachOperationMinTimeoutInSeconds = int(driver.detachOperationMinTimeoutInSeconds)
+		driver.diskController.VMSSDetachTimeoutInSeconds = int(driver.vmssDetachTimeoutInSeconds)
 		klog.V(2).Infof("set DetachOperationMinTimeoutInSeconds as %d", driver.diskController.DetachOperationMinTimeoutInSeconds)
 		if driver.diskController.DetachOperationMinTimeoutInSeconds <= 0 {
 			klog.V(2).Infof("reset DetachOperationMinTimeoutInSeconds as %d", defaultDetachOperationMinTimeoutInSeconds)
 			driver.diskController.DetachOperationMinTimeoutInSeconds = defaultDetachOperationMinTimeoutInSeconds
 		}
+		klog.V(2).Infof("set VMSSDetachTimeoutInSeconds as %d", driver.diskController.VMSSDetachTimeoutInSeconds)
+		if driver.diskController.VMSSDetachTimeoutInSeconds <= 0 || driver.diskController.VMSSDetachTimeoutInSeconds > driver.diskController.DetachOperationMinTimeoutInSeconds {
+			if driver.diskController.DetachOperationMinTimeoutInSeconds <= defaultVMSSDetachTimeoutInSeconds {
+				klog.V(2).Infof("reset VMSSDetachTimeoutInSeconds as DetachOperationMinTimeoutInSeconds %d with no additional polling", driver.diskController.DetachOperationMinTimeoutInSeconds)
+				driver.diskController.VMSSDetachTimeoutInSeconds = driver.diskController.DetachOperationMinTimeoutInSeconds
+			} else {
+				klog.V(2).Infof("reset VMSSDetachTimeoutInSeconds as 20 (default)")
+				driver.diskController.VMSSDetachTimeoutInSeconds = defaultVMSSDetachTimeoutInSeconds
+			}
+		}
 
 		if kubeClient != nil && driver.NodeID == "" && driver.enableMigrationMonitor {
 			eventBroadcaster := record.NewBroadcaster()
-			eventBroadcaster.StartStructuredLogging(0)
 			eventBroadcaster.StartRecordingToSink(&clientcorev1.EventSinkImpl{
 				Interface: kubeClient.CoreV1().Events(""),
 			})
@@ -304,8 +321,12 @@ func NewDriver(options *DriverOptions) *Driver {
 			// Recover any ongoing migrations after restart
 			go func() {
 				time.Sleep(30 * time.Second) // Wait for controller to fully start
-				if err := driver.recoverMigrationMonitorsFromLabels(context.Background()); err != nil {
-					klog.Errorf("Failed to recover migration monitors: %v", err)
+				// Periodically check every 10 minutes - in worst case kubernetes administrator can add the label to subscribe the events
+				for {
+					if err := driver.recoverMigrationMonitorsFromLabels(context.Background()); err != nil {
+						klog.Errorf("Failed to recover migration monitors: %v", err)
+					}
+					time.Sleep(10 * time.Minute)
 				}
 			}()
 		}
@@ -602,7 +623,7 @@ func (d *Driver) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeName 
 	}
 
 	volumeAttachments, err := kubeClient.StorageV1().VolumeAttachments().List(ctx, metav1.ListOptions{
-		TimeoutSeconds: ptr.To(int64(2))})
+		TimeoutSeconds: ptr.To(int64(volumeAttachmentListTimeoutSeconds))})
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +653,7 @@ func (d *Driver) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeName 
 }
 
 // getUsedLunsFromNode returns a list of sorted used luns from Node
-func (d *Driver) getUsedLunsFromNode(ctx context.Context, nodeName types.NodeName) ([]int, error) {
+func (d *Driver) getUsedLunsFromNode(ctx context.Context, nodeName k8stypes.NodeName) ([]int, error) {
 	disks, _, err := d.diskController.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
 	if err != nil {
 		klog.Errorf("error of getting data disks for node %s: %v", nodeName, err)
@@ -652,7 +673,7 @@ func (d *Driver) getUsedLunsFromNode(ctx context.Context, nodeName types.NodeNam
 }
 
 // getNodeInfoFromLabels get zone, instanceType from node labels
-func getNodeInfoFromLabels(ctx context.Context, nodeName string, kubeClient clientset.Interface) (string, string, error) {
+func GetNodeInfoFromLabels(ctx context.Context, nodeName string, kubeClient clientset.Interface) (string, string, error) {
 	if kubeClient == nil || kubeClient.CoreV1() == nil {
 		return "", "", fmt.Errorf("kubeClient is nil")
 	}
@@ -748,7 +769,7 @@ func removeTaintInBackground(k8sClient clientset.Interface, nodeName, driverName
 // removeNotReadyTaint removes the taint disk.csi.azure.com/agent-not-ready from the local node
 // This taint can be optionally applied by users to prevent startup race conditions such as
 // https://github.com/kubernetes/kubernetes/issues/95911
-func removeNotReadyTaint(clientset kubernetes.Interface, nodeName, driverName string) error {
+func removeNotReadyTaint(clientset clientset.Interface, nodeName, driverName string) error {
 	ctx := context.Background()
 	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
@@ -802,7 +823,7 @@ func removeNotReadyTaint(clientset kubernetes.Interface, nodeName, driverName st
 	return nil
 }
 
-func checkAllocatable(ctx context.Context, clientset kubernetes.Interface, nodeName, driverName string) error {
+func checkAllocatable(ctx context.Context, clientset clientset.Interface, nodeName, driverName string) error {
 	csiNode, err := clientset.StorageV1().CSINodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("isAllocatableSet: failed to get CSINode for %s: %w", nodeName, err)
