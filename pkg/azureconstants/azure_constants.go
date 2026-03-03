@@ -37,6 +37,7 @@ const (
 	ErrDiskNotFound                   = "not found"
 	FsTypeField                       = "fstype"
 	IncrementalField                  = "incremental"
+	InstantAccessDurationMinutes      = "instantaccessdurationminutes"
 	KindField                         = "kind"
 	LocationField                     = "location"
 	LogicalSectorSizeField            = "logicalsectorsize"
