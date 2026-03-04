@@ -20,11 +20,12 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
@@ -1485,6 +1486,165 @@ func TestCreateSnapshot(t *testing.T) {
 					ID: &snapshotID,
 				}
 
+				mockSnapshotClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+				mockSnapshotClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(snapshot, nil).AnyTimes()
+				actualresponse, err := d.CreateSnapshot(context.Background(), req)
+				tp := timestamppb.New(*snapshot.Properties.TimeCreated)
+				ready := true
+				expectedresponse := &csi.CreateSnapshotResponse{
+					Snapshot: &csi.Snapshot{
+						SizeBytes:      volumehelper.GiBToBytes(int64(*snapshot.Properties.DiskSizeGB)),
+						SnapshotId:     *snapshot.ID,
+						SourceVolumeId: req.SourceVolumeId,
+						CreationTime:   tp,
+						ReadyToUse:     ready,
+					},
+				}
+				if !reflect.DeepEqual(expectedresponse, actualresponse) || err != nil {
+					t.Errorf("actualresponse: (%+v), expectedresponse: (%+v)\n", actualresponse, expectedresponse)
+					t.Errorf("err:%v", err)
+				}
+			},
+		},
+		{
+			name: "invalid instantAccessDurationMinutes - non-numeric",
+			testFunc: func(t *testing.T) {
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := NewFakeDriver(cntl)
+				parameter := make(map[string]string)
+				parameter[consts.InstantAccessDurationMinutes] = "abc"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "snapname",
+					Parameters:     parameter,
+				}
+				_, err := d.CreateSnapshot(context.Background(), req)
+				_, parseErr := strconv.ParseInt("abc", 10, 64)
+				expectedErr := status.Errorf(codes.InvalidArgument, "invalid value(%s) for %s: %v", "abc", consts.InstantAccessDurationMinutes, parseErr)
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
+			name: "invalid instantAccessDurationMinutes - below range",
+			testFunc: func(t *testing.T) {
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := NewFakeDriver(cntl)
+				parameter := make(map[string]string)
+				parameter[consts.InstantAccessDurationMinutes] = "59"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "snapname",
+					Parameters:     parameter,
+				}
+				_, err := d.CreateSnapshot(context.Background(), req)
+				expectedErr := status.Errorf(codes.InvalidArgument, "invalid value(%d) for %s: must be between 60 and 300 minutes", int64(59), consts.InstantAccessDurationMinutes)
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
+			name: "invalid instantAccessDurationMinutes - above range",
+			testFunc: func(t *testing.T) {
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := NewFakeDriver(cntl)
+				parameter := make(map[string]string)
+				parameter[consts.InstantAccessDurationMinutes] = "301"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "snapname",
+					Parameters:     parameter,
+				}
+				_, err := d.CreateSnapshot(context.Background(), req)
+				expectedErr := status.Errorf(codes.InvalidArgument, "invalid value(%d) for %s: must be between 60 and 300 minutes", int64(301), consts.InstantAccessDurationMinutes)
+				if !reflect.DeepEqual(err, expectedErr) {
+					t.Errorf("actualErr: (%v), expectedErr: (%v)", err, expectedErr)
+				}
+			},
+		},
+		{
+			name: "valid instantAccessDurationMinutes - lower bound",
+			testFunc: func(t *testing.T) {
+				parameter := make(map[string]string)
+				parameter[consts.InstantAccessDurationMinutes] = "60"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "testurl/subscriptions/23/providers/Microsoft.Compute/snapshots/snapshot-name",
+					Parameters:     parameter,
+				}
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := NewFakeDriver(cntl)
+				d.setCloud(&azure.Cloud{})
+				ctrl := gomock.NewController(t)
+				defer ctrl.Finish()
+				mockSnapshotClient := mock_snapshotclient.NewMockInterface(ctrl)
+				d.getClientFactory().(*mock_azclient.MockClientFactory).EXPECT().GetSnapshotClientForSub(gomock.Any()).Return(mockSnapshotClient, nil).AnyTimes()
+				provisioningState := "succeeded"
+				DiskSize := int32(10)
+				snapshotID := "test"
+				snapshot := &armcompute.Snapshot{
+					Properties: &armcompute.SnapshotProperties{
+						TimeCreated:       &time.Time{},
+						ProvisioningState: &provisioningState,
+						DiskSizeGB:        &DiskSize,
+					},
+					ID: &snapshotID,
+				}
+				mockSnapshotClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+				mockSnapshotClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(snapshot, nil).AnyTimes()
+				actualresponse, err := d.CreateSnapshot(context.Background(), req)
+				tp := timestamppb.New(*snapshot.Properties.TimeCreated)
+				ready := true
+				expectedresponse := &csi.CreateSnapshotResponse{
+					Snapshot: &csi.Snapshot{
+						SizeBytes:      volumehelper.GiBToBytes(int64(*snapshot.Properties.DiskSizeGB)),
+						SnapshotId:     *snapshot.ID,
+						SourceVolumeId: req.SourceVolumeId,
+						CreationTime:   tp,
+						ReadyToUse:     ready,
+					},
+				}
+				if !reflect.DeepEqual(expectedresponse, actualresponse) || err != nil {
+					t.Errorf("actualresponse: (%+v), expectedresponse: (%+v)\n", actualresponse, expectedresponse)
+					t.Errorf("err:%v", err)
+				}
+			},
+		},
+		{
+			name: "valid instantAccessDurationMinutes - upper bound",
+			testFunc: func(t *testing.T) {
+				parameter := make(map[string]string)
+				parameter[consts.InstantAccessDurationMinutes] = "300"
+				req := &csi.CreateSnapshotRequest{
+					SourceVolumeId: testVolumeID,
+					Name:           "testurl/subscriptions/23/providers/Microsoft.Compute/snapshots/snapshot-name",
+					Parameters:     parameter,
+				}
+				cntl := gomock.NewController(t)
+				defer cntl.Finish()
+				d, _ := NewFakeDriver(cntl)
+				d.setCloud(&azure.Cloud{})
+				ctrl := gomock.NewController(t)
+				defer ctrl.Finish()
+				mockSnapshotClient := mock_snapshotclient.NewMockInterface(ctrl)
+				d.getClientFactory().(*mock_azclient.MockClientFactory).EXPECT().GetSnapshotClientForSub(gomock.Any()).Return(mockSnapshotClient, nil).AnyTimes()
+				provisioningState := "succeeded"
+				DiskSize := int32(10)
+				snapshotID := "test"
+				snapshot := &armcompute.Snapshot{
+					Properties: &armcompute.SnapshotProperties{
+						TimeCreated:       &time.Time{},
+						ProvisioningState: &provisioningState,
+						DiskSizeGB:        &DiskSize,
+					},
+					ID: &snapshotID,
+				}
 				mockSnapshotClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 				mockSnapshotClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(snapshot, nil).AnyTimes()
 				actualresponse, err := d.CreateSnapshot(context.Background(), req)

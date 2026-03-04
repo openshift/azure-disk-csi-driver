@@ -28,7 +28,7 @@ import (
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 
 	"google.golang.org/grpc/codes"
@@ -835,6 +835,7 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	var customTags string
 	// set incremental snapshot as true by default
 	incremental := true
+	var instantAccessDurationMinutes *int64
 	var resourceGroup, subsID, dataAccessAuthMode, tagValueDelimiter string
 	var err error
 
@@ -855,6 +856,15 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 			dataAccessAuthMode = v
 		case consts.TagValueDelimiterField:
 			tagValueDelimiter = v
+		case consts.InstantAccessDurationMinutes:
+			temp, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid value(%s) for %s: %v", v, consts.InstantAccessDurationMinutes, err)
+			}
+			if temp < 60 || temp > 300 {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid value(%d) for %s: must be between 60 and 300 minutes", temp, consts.InstantAccessDurationMinutes)
+			}
+			instantAccessDurationMinutes = &temp
 		default:
 			return nil, status.Errorf(codes.Internal, "AzureDisk - invalid option %s in VolumeSnapshotClass", k)
 		}
@@ -885,8 +895,9 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	snapshot := armcompute.Snapshot{
 		Properties: &armcompute.SnapshotProperties{
 			CreationData: &armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceVolumeID,
+				CreateOption:                 to.Ptr(armcompute.DiskCreateOptionCopy),
+				SourceResourceID:             &sourceVolumeID,
+				InstantAccessDurationMinutes: instantAccessDurationMinutes,
 			},
 			Incremental: &incremental,
 		},
