@@ -3389,9 +3389,16 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 	defer ctrl.Finish()
 
 	d, _ := NewFakeDriver(ctrl)
-	driver := d.(*fakeDriver)
 	client := fake.NewSimpleClientset()
-	driver.getCloud().KubeClient = client
+	d.getCloud().KubeClient = client
+
+	type vaChecker interface {
+		hasVolumeAttachmentForDiskOnNode(ctx context.Context, nodeName, diskURI string) (bool, error)
+	}
+	checker, ok := d.(vaChecker)
+	if !ok {
+		t.Skip("hasVolumeAttachmentForDiskOnNode is only available on Driver V1")
+	}
 
 	nodeName := "node-1"
 	otherNode := "node-2"
@@ -3405,7 +3412,7 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 		Spec: v1.PersistentVolumeSpec{
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
-					Driver:       driver.Name,
+					Driver:       fakeDriverName,
 					VolumeHandle: diskURI,
 				},
 			},
@@ -3416,7 +3423,7 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
 		ObjectMeta: metav1.ObjectMeta{Name: "va-1"},
 		Spec: storagev1.VolumeAttachmentSpec{
-			Attacher: driver.Name,
+			Attacher: fakeDriverName,
 			NodeName: nodeName,
 			Source: storagev1.VolumeAttachmentSource{
 				PersistentVolumeName: ptr.To(pvName),
@@ -3430,7 +3437,7 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 		Spec: v1.PersistentVolumeSpec{
 			PersistentVolumeSource: v1.PersistentVolumeSource{
 				CSI: &v1.CSIPersistentVolumeSource{
-					Driver:       driver.Name,
+					Driver:       fakeDriverName,
 					VolumeHandle: otherDiskURI,
 				},
 			},
@@ -3441,7 +3448,7 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
 		ObjectMeta: metav1.ObjectMeta{Name: "va-2"},
 		Spec: storagev1.VolumeAttachmentSpec{
-			Attacher: driver.Name,
+			Attacher: fakeDriverName,
 			NodeName: nodeName,
 			Source: storagev1.VolumeAttachmentSource{
 				PersistentVolumeName: ptr.To("pv-2"),
@@ -3453,13 +3460,13 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
 		ObjectMeta: metav1.ObjectMeta{Name: "va-inline"},
 		Spec: storagev1.VolumeAttachmentSpec{
-			Attacher: driver.Name,
+			Attacher: fakeDriverName,
 			NodeName: otherNode,
 			Source: storagev1.VolumeAttachmentSource{
 				InlineVolumeSpec: &v1.PersistentVolumeSpec{
 					PersistentVolumeSource: v1.PersistentVolumeSource{
 						CSI: &v1.CSIPersistentVolumeSource{
-							Driver:       driver.Name,
+							Driver:       fakeDriverName,
 							VolumeHandle: diskURI,
 						},
 					},
@@ -3472,13 +3479,13 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 	_, err = client.StorageV1().VolumeAttachments().Create(context.Background(), &storagev1.VolumeAttachment{
 		ObjectMeta: metav1.ObjectMeta{Name: "va-line"},
 		Spec: storagev1.VolumeAttachmentSpec{
-			Attacher: driver.Name,
+			Attacher: fakeDriverName,
 			NodeName: nodeName,
 			Source: storagev1.VolumeAttachmentSource{
 				InlineVolumeSpec: &v1.PersistentVolumeSpec{
 					PersistentVolumeSource: v1.PersistentVolumeSource{
 						CSI: &v1.CSIPersistentVolumeSource{
-							Driver:       driver.Name,
+							Driver:       fakeDriverName,
 							VolumeHandle: inlineDiskURI,
 						},
 					},
@@ -3523,7 +3530,7 @@ func TestHasVolumeAttachmentForDiskOnNode(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			hasVA, err := driver.hasVolumeAttachmentForDiskOnNode(context.Background(), tc.node, tc.diskURI)
+			hasVA, err := checker.hasVolumeAttachmentForDiskOnNode(context.Background(), tc.node, tc.diskURI)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, hasVA)
 		})
