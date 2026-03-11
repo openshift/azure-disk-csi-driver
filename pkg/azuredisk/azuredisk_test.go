@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 	"golang.org/x/sync/errgroup"
@@ -304,7 +304,7 @@ func TestGetNodeInfoFromLabels(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		_, _, err := getNodeInfoFromLabels(context.TODO(), test.nodeName, test.kubeClient)
+		_, _, err := GetNodeInfoFromLabels(context.TODO(), test.nodeName, test.kubeClient)
 		if !reflect.DeepEqual(err, test.expectedError) {
 			t.Errorf("Unexpected result: %v, expected result: %v", err, test.expectedError)
 		}

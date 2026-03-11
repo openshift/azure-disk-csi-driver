@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"go.uber.org/mock/gomock"
 	"k8s.io/apimachinery/pkg/types"
@@ -96,13 +96,14 @@ type FakeDriver interface {
 	checkDiskExists(ctx context.Context, diskURI string) (*armcompute.Disk, error)
 	waitForSnapshotReady(context.Context, string, string, string, time.Duration, time.Duration) error
 	getSnapshotByID(context.Context, string, string, string, string) (*csi.Snapshot, error)
-	getSnapshotSKU(context.Context, string) (string, error)
+	getSnapshot(context.Context, string) (*armcompute.Snapshot, error)
 	ensureMountPoint(string) (bool, error)
 	ensureBlockTargetFile(string) error
 	getDevicePathWithLUN(lunStr string) (string, error)
 	setThrottlingCache(key string, value string)
 	getUsedLunsFromVolumeAttachments(context.Context, string) ([]int, error)
 	getUsedLunsFromNode(context.Context, types.NodeName) ([]int, error)
+	validateBlockDeviceSize(devicePath string, requestGiB int64) (int64, error)
 }
 
 type fakeDriver struct {

@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
@@ -661,6 +661,51 @@ func TestResizeDisk(t *testing.T) {
 		}
 		assert.Equal(t, test.expectedQuantity.Value(), result.Value(), "TestCase[%d]: %s, expected Quantity: %v, return Quantity: %v", i, test.desc, test.expectedQuantity, result)
 	}
+}
+
+func TestCreateManagedDiskAzureStackHub(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testCloud := provider.GetTestCloud(ctrl)
+	testCloud.Config.Cloud = "AZURESTACKCLOUD"
+
+	common := &controllerCommon{
+		cloud:                              testCloud,
+		lockMap:                            newLockMap(),
+		AttachDetachInitialDelayInMs:       defaultAttachDetachInitialDelayInMs,
+		DetachOperationMinTimeoutInSeconds: defaultDetachOperationMinTimeoutInSeconds,
+		clientFactory:                      testCloud.ComputeClientFactory,
+	}
+
+	managedDiskController := &ManagedDiskController{common}
+
+	volumeOptions := &ManagedDiskOptions{
+		DiskName:            disk1Name,
+		StorageAccountType:  armcompute.DiskStorageAccountTypesStandardLRS,
+		SizeGB:              1,
+		NetworkAccessPolicy: "", // Empty - should remain nil for Azure Stack Hub
+		PublicNetworkAccess: "", // Empty - should remain nil for Azure Stack Hub
+	}
+
+	mockDisksClient := mock_diskclient.NewMockInterface(ctrl)
+	common.clientFactory.(*mock_azclient.MockClientFactory).EXPECT().GetDiskClientForSub(testCloud.SubscriptionID).Return(mockDisksClient, nil)
+
+	mockDisksClient.EXPECT().CreateOrUpdate(gomock.Any(), gomock.Any(), disk1Name, gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, _ string, disk armcompute.Disk) (*armcompute.Disk, error) {
+			assert.Nil(t, disk.Properties.NetworkAccessPolicy, "NetworkAccessPolicy should be nil for Azure Stack Hub")
+			assert.Nil(t, disk.Properties.PublicNetworkAccess, "PublicNetworkAccess should be nil for Azure Stack Hub")
+			return &armcompute.Disk{
+				ID:         ptr.To(disk1ID),
+				Properties: &armcompute.DiskProperties{ProvisioningState: ptr.To("Succeeded")},
+			}, nil
+		})
+
+	_, err := managedDiskController.CreateManagedDisk(ctx, volumeOptions)
+	assert.NoError(t, err)
 }
 
 func TestModifyDisk(t *testing.T) {

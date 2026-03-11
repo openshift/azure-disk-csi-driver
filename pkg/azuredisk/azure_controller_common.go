@@ -26,10 +26,9 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kwait "k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
 	volerr "k8s.io/cloud-provider/volume/errors"
@@ -58,12 +57,16 @@ const (
 	sourceVolume           = "volume"
 	attachDiskMapKeySuffix = "attachdiskmap"
 	detachDiskMapKeySuffix = "detachdiskmap"
+	detachInProgress       = "detach in progress"
 
 	// default initial delay in milliseconds for batch disk attach/detach
 	defaultAttachDetachInitialDelayInMs = 1000
 
 	// default detach operation timeout
 	defaultDetachOperationMinTimeoutInSeconds = 240
+
+	// default timeout for VMSS detach operation before polling on GET VM to verify detach status
+	defaultVMSSDetachTimeoutInSeconds = 20
 
 	// WriteAcceleratorEnabled support for Azure Write Accelerator on Azure Disks
 	// https://docs.microsoft.com/azure/virtual-machines/windows/how-to-enable-write-accelerator
@@ -98,9 +101,12 @@ type controllerCommon struct {
 	DetachOperationMinTimeoutInSeconds int
 	// AttachDetachInitialDelayInMs determines initial delay in milliseconds for batch disk attach/detach
 	AttachDetachInitialDelayInMs int
-	ForceDetachBackoff           bool
-	WaitForDetach                bool
-	CheckDiskCountForBatching    bool
+	// VMSSDetachTimeoutInSeconds determines timeout for polling on VMSS detach operation before polling on GET VM to verify detach status
+	// This timeout should be lower than DetachOperationMinTimeoutInSeconds and cover most detach operations
+	VMSSDetachTimeoutInSeconds int
+	ForceDetachBackoff         bool
+	WaitForDetach              bool
+	CheckDiskCountForBatching  bool
 	// a timed cache for disk attach hitting max data disk count, <nodeName, "">
 	hitMaxDataDiskCountCache azcache.Resource
 }
@@ -198,7 +204,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 	var waitForDetachHappened bool
 	if c.WaitForDetach && c.isMaxDataDiskCountExceeded(ctx, string(nodeName)) {
 		// wait for disk detach to finish first on the same node
-		if err = wait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
+		if err = kwait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
 			detachDiskReqeustNum, err := c.getDetachDiskRequestNum(node)
 			if err != nil {
 				return false, err
@@ -224,11 +230,11 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 
 	numDisksAllowed := math.MaxInt
 	if c.CheckDiskCountForBatching {
-		_, instanceType, err := getNodeInfoFromLabels(ctx, string(nodeName), c.cloud.KubeClient)
+		_, instanceType, err := GetNodeInfoFromLabels(ctx, string(nodeName), c.cloud.KubeClient)
 		if err != nil {
 			klog.Errorf("failed to get node info from labels: %v", err)
 		} else if instanceType != "" {
-			maxNumDisks, instanceExists := getMaxDataDiskCount(instanceType)
+			maxNumDisks, instanceExists := GetMaxDataDiskCount(instanceType)
 			if instanceExists {
 				attachedDisks, _, err := c.GetNodeDataDisks(ctx, nodeName, azcache.CacheReadTypeDefault)
 				if err != nil {
@@ -367,7 +373,7 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 			// if host doesn't exist, no need to detach
 			klog.Warningf("azureDisk - failed to get azure instance id(%s), DetachDisk(%s) will assume disk is already detached",
 				nodeName, diskURI)
-			return nil
+			return c.waitForDiskManagedByTobeRemoved(ctx, diskURI)
 		}
 		klog.Warningf("failed to get azure instance id (%v)", err)
 		return fmt.Errorf("failed to get azure instance id for node %q: %w", nodeName, err)
@@ -409,8 +415,9 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 	c.diskStateMap.Store(formattedDiskURI, "detaching")
 	defer c.diskStateMap.Delete(formattedDiskURI)
 
-	// Calculate timeout for regular detach operation, if operation fails or times out,
-	// we need to have an active context to issue a force detach
+	// Calculate the timeout for the regular detach operation. If the operation fails or times out,
+	// we need an active context to issue a force detach if necessary.
+	// This timeout determines how long the CSI driver will wait before attempting a force detach.
 	detachContextTimeout := time.Duration(c.DetachOperationMinTimeoutInSeconds) * time.Second
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
@@ -422,17 +429,58 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 	detachCtx, cancel := context.WithTimeout(ctx, detachContextTimeout)
 	defer cancel()
 
-	if err = vmset.DetachDisk(detachCtx, nodeName, diskMap, false); err != nil {
+	// vmssDetachTimeout is the timeout where we expect most VMSS detach operations to finish within
+	vmssDetachTimeout := time.Duration(c.VMSSDetachTimeoutInSeconds) * time.Second
+	if vmssDetachTimeout == 0 || vmssDetachTimeout > detachContextTimeout {
+		vmssDetachTimeout = detachContextTimeout
+		klog.V(2).Infof("reset vmssDetachTimeout as detachContextTimeout %v", detachContextTimeout)
+	}
+
+	// earlyExitCtx provides an initial timeout for VMSS detach operations that covers most cases.
+	// If the detach doesn't complete within this timeout, we stop waiting for the operation result
+	// and instead switch to polling the VM's data disk list directly via GET requests.
+	// This approach is critical during zone outages or other scenarios where disks may detach
+	// outside the CSI driver's control. By polling the actual VM state, we can confirm if the
+	// disk was successfully detached and avoid unnecessary force detach operations that could impact VM stability.
+	earlyExitCtx, earlyCancel := context.WithTimeout(detachCtx, vmssDetachTimeout)
+	defer earlyCancel()
+
+	if err = vmset.DetachDisk(earlyExitCtx, nodeName, diskMap, false); err != nil {
 		if isInstanceNotFoundError(err) {
 			// if host doesn't exist, no need to detach
 			klog.Warningf("azureDisk - got InstanceNotFoundError(%v), DetachDisk(%s) will assume disk is already detached",
 				err, diskURI)
-			return nil
+			return c.waitForDiskManagedByTobeRemoved(ctx, diskURI)
 		}
-		if c.ForceDetachBackoff && !azureutils.IsThrottlingError(err) {
-			klog.Errorf("azureDisk - DetachDisk(%s) from node %s failed with error: %v, retry with force detach", diskURI, nodeName, err)
+
+		// if operation is preempted by a force operation on VM, check if the disk got detached before returning error
+		if preemptedByForceOperation(err) {
+			klog.Errorf("azureDisk - DetachDisk(%s) from node %s was preempted by a concurrent force detach operation", diskName, nodeName)
+			return c.verifyDetach(ctx, diskName, diskURI, nodeName)
+		}
+
+		// continue polling on GET VM to verify detach status
+		if errors.Is(err, context.DeadlineExceeded) {
+			klog.Errorf("azureDisk - DetachDisk(%s) from node %s timed out after %v", diskName, nodeName, vmssDetachTimeout)
+			err = c.pollForDetachCompletion(detachCtx, diskName, diskURI, nodeName, vmset)
+		}
+
+		if err != nil && c.ForceDetachBackoff {
+			klog.Errorf("azureDisk - DetachDisk(%s) from node %s failed with error: %v, retry with force detach", diskName, nodeName, err)
 			err = vmset.DetachDisk(ctx, nodeName, diskMap, true)
 		}
+	}
+
+	// return the detach result directly if the lun cannot be checked
+	if err != nil {
+		klog.Errorf("azureDisk - detach disk(%s) failed, err: %v", diskName, err)
+		return err
+	}
+
+	err = c.waitForDiskManagedByTobeRemoved(ctx, diskURI)
+	if err != nil {
+		klog.Errorf("azureDisk - waitForDiskManagedByTobeRemoved(%s) failed, err: %v", diskURI, err)
+		return err
 	}
 
 	if !c.DisableDiskLunCheck {
@@ -440,12 +488,7 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 		return c.verifyDetach(ctx, diskName, diskURI, nodeName)
 	}
 
-	// return the detach result directly if the lun cannot be checked
-	if err != nil {
-		klog.Errorf("azureDisk - detach disk(%s, %s) failed, err: %v", diskName, diskURI, err)
-		return err
-	}
-	klog.V(2).Infof("azureDisk - detach disk(%s, %s) succeeded", diskName, diskURI)
+	klog.V(2).Infof("azureDisk - detach disk(%s) succeeded", diskName)
 	return nil
 }
 
@@ -479,8 +522,31 @@ func (c *controllerCommon) verifyDetach(ctx context.Context, diskName, diskURI s
 		klog.Errorf("azureDisk - detach disk(%s, %s) failed, error: %v", diskName, diskURI, errGetLun)
 		return errGetLun
 	}
-
 	return fmt.Errorf("disk(%s) is still attached to node(%s) on lun(%d), vmState: %s", diskURI, nodeName, lun, ptr.Deref(vmState, ""))
+}
+
+// pollForDetachCompletion polls on GET VM to verify detach status
+func (c *controllerCommon) pollForDetachCompletion(detachCtx context.Context, diskName, diskURI string, nodeName types.NodeName, vmset provider.VMSet) error {
+	// poll on GET VM to verify detach status
+	return kwait.ExponentialBackoffWithContext(detachCtx, defaultBackOff, func(_ context.Context) (bool, error) {
+		_ = vmset.DeleteCacheForNode(detachCtx, string(nodeName))
+		_, _, errGetLun := c.GetDiskLun(detachCtx, diskName, diskURI, nodeName)
+		if errGetLun != nil {
+			if strings.Contains(errGetLun.Error(), consts.CannotFindDiskLUN) {
+				klog.V(2).Infof("polling on GET VM: detach disk(%s) succeeded", diskName)
+				return true, nil
+			}
+			if strings.Contains(errGetLun.Error(), detachInProgress) {
+				klog.V(2).Infof("polling on GET VM: detach disk(%s) is in progress", diskName)
+				return false, nil
+			}
+			// if request throttled or other error occurred, we will return error to stop polling
+			klog.Errorf("polling on GET VM: detach disk(%s) failed, error: %v", diskName, errGetLun)
+			return false, errGetLun
+		}
+		klog.V(2).Infof("polling on GET VM: detach disk(%s) is still in progress", diskName)
+		return false, nil
+	})
 }
 
 // verifyAttach verifies if the disk is attached to the node by checking the disk lun.
@@ -587,11 +653,12 @@ func (c *controllerCommon) GetDiskLun(ctx context.Context, diskName, diskURI str
 			(disk.ManagedDisk != nil && strings.EqualFold(*disk.ManagedDisk.ID, diskURI)) {
 			if disk.ToBeDetached != nil && *disk.ToBeDetached {
 				klog.Warningf("azureDisk - found disk(ToBeDetached): lun %d name %s uri %s", *disk.Lun, diskName, diskURI)
-			} else {
-				// found the disk
-				klog.V(2).Infof("azureDisk - found disk: lun %d name %s uri %s", *disk.Lun, diskName, diskURI)
-				return *disk.Lun, provisioningState, nil
+				return -1, provisioningState, fmt.Errorf("disk(%s) is in ToBeDetached state on node(%s): %s", diskURI, nodeName, detachInProgress)
 			}
+			// found the disk
+			klog.V(2).Infof("azureDisk - found disk: lun %d name %s uri %s", *disk.Lun, diskName, diskURI)
+			return *disk.Lun, provisioningState, nil
+
 		}
 	}
 	return -1, provisioningState, fmt.Errorf("%s for disk %s", consts.CannotFindDiskLUN, diskName)
@@ -680,6 +747,39 @@ func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeN
 	return true
 }
 
+// For cases where an instance is deleted, we assume the disk is detached, but it actually
+// takes a while for disk property to be updated. We do not want to presume such disks to be detached
+// without waiting for disk to be actually detached.
+func (c *controllerCommon) waitForDiskManagedByTobeRemoved(ctx context.Context, diskURI string) error {
+	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
+	if err != nil {
+		return err
+	}
+	klog.V(2).Infof("azureDisk - waitForDiskManagedByTobeRemoved: diskURI(%s)", diskURI)
+	var disk *armcompute.Disk
+	waitFunc := func(ctx context.Context) (bool, error) {
+		diskclient, err := c.clientFactory.GetDiskClientForSub(subsID)
+		if err != nil {
+			return false, fmt.Errorf("error making diskClient while verifying detach: %w", err)
+		}
+		disk, err = diskclient.Get(ctx, resourceGroup, diskName)
+		if err != nil {
+			return false, fmt.Errorf("error getting disk: %w", err)
+		}
+
+		if disk.ManagedBy == nil {
+			return true, nil
+		}
+
+		return false, nil
+	}
+	err = kwait.ExponentialBackoffWithContext(ctx, defaultBackOff, waitFunc)
+	if err != nil && disk != nil && disk.ManagedBy != nil {
+		klog.Errorf("error in - waitForDiskManagedByTobeRemoved, disk %s still has ManagedBy (VM resource ID) %s", diskURI, *disk.ManagedBy)
+	}
+	return err
+}
+
 func getValidCreationData(subscriptionID, resourceGroup string, options *ManagedDiskOptions) (armcompute.CreationData, error) {
 	if options.SourceResourceID == "" {
 		return armcompute.CreationData{
@@ -726,4 +826,12 @@ func isInstanceNotFoundError(err error) bool {
 		return true
 	}
 	return strings.Contains(errMsg, errStatusCode400) && strings.Contains(errMsg, errInvalidParameter) && strings.Contains(errMsg, errTargetInstanceIDs)
+}
+
+// preemptedByForceOperation checks if a regular detach operation was preempted by a concurrent force detach.
+// Azure VMSS returns a DataDisksForceDetached error when a force detach operation is already in progress or completed,
+// causing any pending regular detach operations to be cancelled and preempted.
+func preemptedByForceOperation(err error) bool {
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, strings.ToLower("DataDisksForceDetached"))
 }
