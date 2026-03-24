@@ -50,6 +50,7 @@ type DriverOptions struct {
 	TrafficManagerPort                 int64
 	AttachDetachInitialDelayInMs       int64
 	DetachOperationMinTimeoutInSeconds int64
+	VMSSDetachTimeoutInSeconds         int64
 	VMSSCacheTTLInSeconds              int64
 	ListVMSSWithInstanceView           bool
 	VolStatsCacheExpireInMinutes       int64
@@ -73,6 +74,7 @@ type DriverOptions struct {
 	ConcurrentFormatTimeout            int64
 	GoMaxProcs                         int64
 	EnableMigrationMonitor             bool
+	ConvertRWCachingModeForIntreePV    bool
 }
 
 func (o *DriverOptions) AddFlags() *flag.FlagSet {
@@ -104,6 +106,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.Int64Var(&o.TrafficManagerPort, "traffic-manager-port", 7788, "default traffic manager port")
 	fs.Int64Var(&o.AttachDetachInitialDelayInMs, "attach-detach-initial-delay-ms", 1000, "initial delay in milliseconds for batch disk attach/detach")
 	fs.Int64Var(&o.DetachOperationMinTimeoutInSeconds, "detach-operation-min-timeout-seconds", 240, "minimum detach operation timeout in seconds")
+	fs.Int64Var(&o.VMSSDetachTimeoutInSeconds, "vmss-detach-timeout-seconds", 20, "per-operation timeout in seconds for VMSS disk detach API calls before falling back to polling the Get VM to verify detach status; increase this value if VMSS detach requests frequently time ou")
 	fs.Int64Var(&o.VMSSCacheTTLInSeconds, "vmss-cache-ttl-seconds", -1, "vmss cache TTL in seconds (600 by default)")
 	fs.BoolVar(&o.ListVMSSWithInstanceView, "list-vmss-with-instance-view", false, "boolean flag to enable vmss cache with instance view")
 	fs.Int64Var(&o.VolStatsCacheExpireInMinutes, "vol-stats-cache-expire-in-minutes", 10, "The cache expire time in minutes for volume stats cache")
@@ -127,5 +130,6 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.Int64Var(&o.ConcurrentFormatTimeout, "concurrent-format-timeout", 300, "maximum time in seconds duration of a format operation before its concurrency token is released")
 	fs.Int64Var(&o.GoMaxProcs, "max-procs", 2, "maximum number of CPUs that can be executing simultaneously in golang runtime")
 	fs.BoolVar(&o.EnableMigrationMonitor, "enable-migration-monitor", true, "enable migration monitor for Azure Disk CSI Driver")
+	fs.BoolVar(&o.ConvertRWCachingModeForIntreePV, "convert-rw-caching-mode-for-intree-pv", false, "convert ReadWrite cachingMode to ReadOnly for intree PVs to avoid issues")
 	return fs
 }
