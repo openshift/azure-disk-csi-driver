@@ -68,6 +68,7 @@ func newFakeDriverV2(ctrl *gomock.Controller) (*fakeDriverV2, error) {
 	driver.hostUtil = azureutils.NewFakeHostUtil()
 	driver.useCSIProxyGAInterface = true
 	driver.allowEmptyCloudConfig = true
+	driver.shouldWaitForSnapshotReady = true
 	driver.endpoint = "tcp://127.0.0.1:0"
 	driver.disableAVSetNodes = true
 	driver.kubeClient = fake.NewSimpleClientset()
@@ -104,6 +105,14 @@ func newFakeDriverV2(ctrl *gomock.Controller) (*fakeDriverV2, error) {
 	})
 
 	return &driver, nil
+}
+
+func (d *fakeDriverV2) SetWaitForSnapshotReady(shouldWait bool) {
+	d.shouldWaitForSnapshotReady = shouldWait
+}
+
+func (d *fakeDriverV2) GetWaitForSnapshotReady() bool {
+	return d.shouldWaitForSnapshotReady
 }
 
 func (d *fakeDriverV2) setNextCommandOutputScripts(scripts ...testingexec.FakeAction) {
