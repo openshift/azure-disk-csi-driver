@@ -23,7 +23,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -50,24 +50,24 @@ func (as *availabilitySet) AttachDisk(ctx context.Context, nodeName types.NodeNa
 	copy(disks, vm.Properties.StorageProfile.DataDisks)
 
 	for k, v := range diskMap {
-		diskURI := k
+		diSKURI := k
 		opt := v
 		attached := false
 		for _, disk := range vm.Properties.StorageProfile.DataDisks {
-			if disk.ManagedDisk != nil && strings.EqualFold(*disk.ManagedDisk.ID, diskURI) && disk.Lun != nil {
+			if disk.ManagedDisk != nil && strings.EqualFold(*disk.ManagedDisk.ID, diSKURI) && disk.Lun != nil {
 				if *disk.Lun == opt.Lun {
 					attached = true
 					break
 				}
-				return fmt.Errorf("disk(%s) already attached to node(%s) on LUN(%d), but target LUN is %d", diskURI, nodeName, *disk.Lun, opt.Lun)
+				return fmt.Errorf("disk(%s) already attached to node(%s) on LUN(%d), but target LUN is %d", diSKURI, nodeName, *disk.Lun, opt.Lun)
 			}
 		}
 		if attached {
-			klog.V(2).Infof("azureDisk - disk(%s) already attached to node(%s) on LUN(%d)", diskURI, nodeName, opt.Lun)
+			klog.V(2).Infof("azureDisk - disk(%s) already attached to node(%s) on LUN(%d)", diSKURI, nodeName, opt.Lun)
 			continue
 		}
 
-		managedDisk := &armcompute.ManagedDiskParameters{ID: &diskURI}
+		managedDisk := &armcompute.ManagedDiskParameters{ID: &diSKURI}
 		if opt.DiskEncryptionSetID == "" {
 			if vm.Properties.StorageProfile.OSDisk != nil &&
 				vm.Properties.StorageProfile.OSDisk.ManagedDisk != nil &&
@@ -112,14 +112,15 @@ func (as *availabilitySet) AttachDisk(ctx context.Context, nodeName types.NodeNa
 		}
 	}
 
-	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - attach disk list(%v) returned with %v", nodeResourceGroup, vmName, diskMap, err)
-
-	if rerr == nil && result != nil {
-		as.updateCache(vmName, result)
-	} else {
-		_ = as.DeleteCacheForNode(ctx, vmName)
+	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - attach disk list(%v) returned with %v", nodeResourceGroup, vmName, diskMap, rerr)
+	if rerr != nil {
+		return rerr
 	}
-	return rerr
+
+	// clean node cache first and then update cache
+	_ = as.DeleteCacheForNode(ctx, vmName)
+	as.updateCache(vmName, result)
+	return nil
 }
 
 func (as *availabilitySet) DeleteCacheForNode(_ context.Context, nodeName string) error {
@@ -152,12 +153,12 @@ func (as *availabilitySet) DetachDisk(ctx context.Context, nodeName types.NodeNa
 
 	bFoundDisk := false
 	for i, disk := range disks {
-		for diskURI, diskName := range diskMap {
+		for diSKURI, diskName := range diskMap {
 			if disk.Lun != nil && (disk.Name != nil && diskName != "" && strings.EqualFold(*disk.Name, diskName)) ||
-				(disk.Vhd != nil && disk.Vhd.URI != nil && diskURI != "" && strings.EqualFold(*disk.Vhd.URI, diskURI)) ||
-				(disk.ManagedDisk != nil && diskURI != "" && strings.EqualFold(*disk.ManagedDisk.ID, diskURI)) {
+				(disk.Vhd != nil && disk.Vhd.URI != nil && diSKURI != "" && strings.EqualFold(*disk.Vhd.URI, diSKURI)) ||
+				(disk.ManagedDisk != nil && diSKURI != "" && strings.EqualFold(*disk.ManagedDisk.ID, diSKURI)) {
 				// found the disk
-				klog.V(2).Infof("azureDisk - detach disk: name %s uri %s", diskName, diskURI)
+				klog.V(2).Infof("azureDisk - detach disk: name %s uri %s", diskName, diSKURI)
 				disks[i].ToBeDetached = ptr.To(true)
 				if forceDetach {
 					disks[i].DetachOption = to.Ptr(armcompute.DiskDetachOptionTypesForceDetach)
@@ -193,7 +194,14 @@ func (as *availabilitySet) DetachDisk(ctx context.Context, nodeName types.NodeNa
 	}
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s) node(%s)- detach disk list(%s)", nodeResourceGroup, vmName, nodeName, diskMap)
 
-	result, err := as.ComputeClientFactory.GetVirtualMachineClient().CreateOrUpdate(ctx, nodeResourceGroup, vmName, newVM)
+	var result *armcompute.VirtualMachine
+	defer func() {
+		// invalidate the cache right after updating
+		_ = as.DeleteCacheForNode(ctx, vmName)
+		as.updateCache(vmName, result)
+	}()
+
+	result, err = as.ComputeClientFactory.GetVirtualMachineClient().CreateOrUpdate(ctx, nodeResourceGroup, vmName, newVM)
 	if err != nil {
 		klog.Errorf("azureDisk - detach disk list(%s) on rg(%s) vm(%s) failed, err: %v", diskMap, nodeResourceGroup, vmName, err)
 		var exists bool
@@ -206,12 +214,6 @@ func (as *availabilitySet) DetachDisk(ctx context.Context, nodeName types.NodeNa
 	}
 
 	klog.V(2).Infof("azureDisk - update(%s): vm(%s) - detach disk list(%s) returned with %v", nodeResourceGroup, vmName, diskMap, err)
-
-	if err == nil && result != nil {
-		as.updateCache(vmName, result)
-	} else {
-		_ = as.DeleteCacheForNode(ctx, vmName)
-	}
 	return err
 }
 
@@ -229,14 +231,12 @@ func (as *availabilitySet) UpdateVM(ctx context.Context, nodeName types.NodeName
 			// if the VM does not exist, we should not update the cache
 			return nil
 		}
+		return rerr
 	}
-
-	if rerr == nil && result != nil {
-		as.updateCache(vmName, result)
-	} else {
-		_ = as.DeleteCacheForNode(ctx, vmName)
-	}
-	return rerr
+	// clean node cache first and then update cache
+	_ = as.DeleteCacheForNode(ctx, vmName)
+	as.updateCache(vmName, result)
+	return nil
 }
 
 func (as *availabilitySet) updateCache(nodeName string, vm *armcompute.VirtualMachine) {

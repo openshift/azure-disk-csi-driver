@@ -68,14 +68,8 @@ func (r *repo) Get(ctx context.Context, routeTableName string, crt cache.AzureCa
 	if err != nil {
 		return nil, fmt.Errorf("get RouteTable: %w", err)
 	}
-	if rt == nil {
-		return nil, nil
-	}
-	routeTable, ok := rt.(*armnetwork.RouteTable)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type for RouteTable: got %T, want *armnetwork.RouteTable", rt)
-	}
-	return routeTable, nil
+
+	return rt.(*armnetwork.RouteTable), nil
 }
 
 func (r *repo) CreateOrUpdate(ctx context.Context, routeTable armnetwork.RouteTable) (*armnetwork.RouteTable, error) {

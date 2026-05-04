@@ -30,8 +30,6 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
-const MooncakeApiVersion = "2023-07-01"
-
 type Client struct {
 	*armcontainerregistry.RegistriesClient
 	subscriptionID string

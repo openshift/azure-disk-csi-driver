@@ -26,8 +26,6 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
-const MooncakeApiVersion = "2023-05-01"
-
 type Client struct {
 	*armstorage.FileSharesClient
 	subscriptionID string
