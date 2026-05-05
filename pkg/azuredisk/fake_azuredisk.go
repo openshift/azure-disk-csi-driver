@@ -192,10 +192,10 @@ func createVolumeCapability(accessMode csi.VolumeCapability_AccessMode_Mode) *cs
 	}
 }
 
-func (d *fakeDriver) SetWaitForSnapshotReady(shouldWait bool) {
+func (d *fakeDriverV1) SetWaitForSnapshotReady(shouldWait bool) {
 	d.shouldWaitForSnapshotReady = shouldWait
 }
 
-func (d *fakeDriver) GetWaitForSnapshotReady() bool {
+func (d *fakeDriverV1) GetWaitForSnapshotReady() bool {
 	return d.shouldWaitForSnapshotReady
 }

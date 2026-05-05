@@ -2146,6 +2146,9 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "valid request snapshots taking time - cross region",
 			testFunc: func(t *testing.T) {
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
 				parameter := make(map[string]string)
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
