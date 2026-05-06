@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -58,6 +59,8 @@ import (
 	azurecloudconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
+
+var useDriverV2 = flag.Bool("temp-use-driver-v2", false, "A temporary flag to enable early test and development of Azure Disk CSI Driver V2. This will be removed in the future.")
 
 var (
 	// taintRemovalInitialDelay is the initial delay for node taint removal

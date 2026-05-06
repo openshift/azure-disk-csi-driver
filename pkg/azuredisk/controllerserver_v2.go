@@ -836,6 +836,7 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	// set incremental snapshot as true by default
 	incremental := true
 	var resourceGroup, subsID, dataAccessAuthMode, tagValueDelimiter string
+	var instantAccessDurationMinutes *int64
 	var err error
 
 	parameters := req.GetParameters()
@@ -855,6 +856,15 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 			dataAccessAuthMode = v
 		case consts.TagValueDelimiterField:
 			tagValueDelimiter = v
+		case consts.InstantAccessDurationMinutes:
+			temp, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid value(%s) for %s: %v", v, consts.InstantAccessDurationMinutes, err)
+			}
+			if temp < 60 || temp > 300 {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid value(%d) for %s: must be between 60 and 300 minutes", temp, consts.InstantAccessDurationMinutes)
+			}
+			instantAccessDurationMinutes = &temp
 		default:
 			return nil, status.Errorf(codes.Internal, "AzureDisk - invalid option %s in VolumeSnapshotClass", k)
 		}
@@ -885,8 +895,9 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	snapshot := armcompute.Snapshot{
 		Properties: &armcompute.SnapshotProperties{
 			CreationData: &armcompute.CreationData{
-				CreateOption:     to.Ptr(armcompute.DiskCreateOptionCopy),
-				SourceResourceID: &sourceVolumeID,
+				CreateOption:                 to.Ptr(armcompute.DiskCreateOptionCopy),
+				SourceResourceID:             &sourceVolumeID,
+				InstantAccessDurationMinutes: instantAccessDurationMinutes,
 			},
 			Incremental: &incremental,
 		},
@@ -902,8 +913,11 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 
 	mc := metrics.NewMetricContext(consts.AzureDiskCSIDriverName, "controller_create_snapshot", d.cloud.ResourceGroup, d.cloud.SubscriptionID, d.Name)
 	isOperationSucceeded := false
+	isOperationInProgress := false
 	defer func() {
-		mc.ObserveOperationWithResult(isOperationSucceeded, consts.SourceResourceID, sourceVolumeID, consts.SnapshotName, snapshotName)
+		if !isOperationInProgress {
+			mc.ObserveOperationWithResult(isOperationSucceeded, consts.SourceResourceID, sourceVolumeID, consts.SnapshotName, snapshotName)
+		}
 	}()
 
 	klog.V(2).Infof("begin to create snapshot(%s, incremental: %v) under rg(%s)", snapshotName, incremental, resourceGroup)
@@ -911,21 +925,33 @@ func (d *DriverV2) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRe
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "could not get snapshot client for subscription(%s) with error(%v)", subsID, err)
 	}
-	if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, snapshotName, snapshot); err != nil {
-		if strings.Contains(err.Error(), "existing disk") {
-			return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", snapshotName, resourceGroup, err))
+
+	csiSnapshot, _ := d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, "")
+	if csiSnapshot == nil || sourceVolumeID != csiSnapshot.SourceVolumeId {
+		if _, err := snapshotClient.CreateOrUpdate(ctx, resourceGroup, snapshotName, snapshot); err != nil {
+			if strings.Contains(err.Error(), "existing disk") {
+				return nil, status.Error(codes.AlreadyExists, fmt.Sprintf("request snapshot(%s) under rg(%s) already exists, but the SourceVolumeId is different, error details: %v", snapshotName, resourceGroup, err))
+			}
+			azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
+			return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err))
 		}
-		azureutils.SleepIfThrottled(err, consts.SnapshotOpThrottlingSleepSec)
-		return nil, status.Error(codes.Internal, fmt.Sprintf("create snapshot error: %v", err))
 	}
-	if err := d.waitForSnapshotReady(ctx, subsID, resourceGroup, snapshotName, waitForSnapshotReadyInterval, waitForSnapshotReadyTimeout); err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("waitForSnapshotReady(%s, %s, %s) failed with %v", subsID, resourceGroup, snapshotName, err))
+
+	if d.shouldWaitForSnapshotReady && instantAccessDurationMinutes == nil {
+		if err := d.waitForSnapshotReady(ctx, subsID, resourceGroup, snapshotName, waitForSnapshotReadyInterval, waitForSnapshotReadyTimeout); err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("waitForSnapshotReady(%s, %s, %s) failed with %v", subsID, resourceGroup, snapshotName, err))
+		}
+	} else if instantAccessDurationMinutes != nil {
+		klog.V(2).Infof("skip waiting for snapshot(%s) ready since instantAccessDurationMinutes(%d) is set", snapshotName, *instantAccessDurationMinutes)
 	}
 	klog.V(2).Infof("create snapshot(%s) under rg(%s) successfully", snapshotName, resourceGroup)
 
-	csiSnapshot, err := d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, sourceVolumeID)
+	csiSnapshot, err = d.getSnapshotByID(ctx, subsID, resourceGroup, snapshotName, sourceVolumeID)
 	if err != nil {
 		return nil, err
+	} else if csiSnapshot == nil {
+		klog.Errorf("getSnapshotByID(%s, %s, %s) did not return a valid snapshot", subsID, resourceGroup, snapshotName)
+		return nil, status.Error(codes.Internal, fmt.Sprintf("getSnapshotByID(%s, %s, %s) did not return a valid snapshot", subsID, resourceGroup, snapshotName))
 	}
 
 	createResp := &csi.CreateSnapshotResponse{
