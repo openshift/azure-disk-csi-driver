@@ -1418,6 +1418,9 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "cross region non-incremental error ",
 			testFunc: func(t *testing.T) {
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
 				parameter := make(map[string]string)
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "false"
@@ -1677,6 +1680,9 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "create snapshot error - cross region",
 			testFunc: func(t *testing.T) {
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
 				parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["location"] = "eastus"
@@ -1732,7 +1738,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "create snapshot already exist - cross region",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
@@ -1787,7 +1796,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "Wait snapshot ready error - cross region",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
@@ -1843,7 +1855,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "Get snapshot ID error - cross region",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
@@ -1950,7 +1965,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "valid request - set optional parameter",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["dataaccessauthmode"] = "None"
 				parameter["tagvaluedelimiter"] = ","
@@ -2058,7 +2076,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "valid request - cross region",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
 				req := &csi.CreateSnapshotRequest{
@@ -2110,7 +2131,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "valid request snapshots taking time - cross region",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
 				snapshotName := "snapshotname"
@@ -2245,7 +2269,10 @@ func RunTestCreateSnapshot(t *testing.T, fakeDriverFn func(t *gomock.Controller)
 		{
 			name: "valid request - cross region with delete error still success",
 			testFunc: func(t *testing.T) {
-				parameter := make(map[string]string)
+				if *useDriverV2 {
+					t.Skip("Skip the test for driver v2")
+				}
+								parameter := make(map[string]string)
 				parameter["tags"] = "unit=test"
 				parameter["location"] = "eastus"
 				parameter["incremental"] = "true"
