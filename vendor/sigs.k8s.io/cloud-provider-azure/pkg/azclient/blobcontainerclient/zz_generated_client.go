@@ -31,7 +31,6 @@ import (
 )
 
 const AzureStackCloudAPIVersion = "2019-06-01"
-const MooncakeApiVersion = "2023-05-01"
 
 type Client struct {
 	*armstorage.BlobContainersClient

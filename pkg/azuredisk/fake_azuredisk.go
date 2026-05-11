@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"go.uber.org/mock/gomock"
 	"k8s.io/apimachinery/pkg/types"
@@ -68,6 +68,8 @@ type FakeDriver interface {
 	CSIDriver
 
 	GetSourceDiskSize(ctx context.Context, subsID, resourceGroup, diskName string, curDepth, maxDepth int) (*int32, *armcompute.Disk, error)
+	SetWaitForSnapshotReady(bool)
+	GetWaitForSnapshotReady() bool
 
 	setNextCommandOutputScripts(scripts ...testingexec.FakeAction)
 
@@ -188,4 +190,12 @@ func createVolumeCapability(accessMode csi.VolumeCapability_AccessMode_Mode) *cs
 			Mode: accessMode,
 		},
 	}
+}
+
+func (d *fakeDriverV1) SetWaitForSnapshotReady(shouldWait bool) {
+	d.shouldWaitForSnapshotReady = shouldWait
+}
+
+func (d *fakeDriverV1) GetWaitForSnapshotReady() bool {
+	return d.shouldWaitForSnapshotReady
 }

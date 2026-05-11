@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 	"github.com/samber/lo"
 
@@ -122,7 +122,7 @@ func (az *Cloud) getNetworkResourceSubscriptionID() string {
 	return az.SubscriptionID
 }
 
-func (az *Cloud) mapLoadBalancerNameToVMSet(lbName, clusterName string) (vmSetName string) {
+func (az *Cloud) mapLoadBalancerNameToVMSet(lbName string, clusterName string) (vmSetName string) {
 	vmSetName = trimSuffixIgnoreCase(lbName, consts.InternalLoadBalancerNameSuffix)
 	if strings.EqualFold(clusterName, vmSetName) {
 		vmSetName = az.VMSet.GetPrimaryVMSetName()

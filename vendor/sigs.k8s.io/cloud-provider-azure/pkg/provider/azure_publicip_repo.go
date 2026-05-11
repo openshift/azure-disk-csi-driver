@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -119,8 +118,6 @@ func (az *Cloud) newPIPCache() (azcache.Resource, error) {
 }
 
 func (az *Cloud) getPublicIPAddress(ctx context.Context, pipResourceGroup string, pipName string, crt azcache.AzureCacheReadType) (*armnetwork.PublicIPAddress, bool, error) {
-	logger := klog.FromContext(ctx).WithName("getPublicIPAddress").
-		WithValues("pipResourceGroup", pipResourceGroup, "pipName", pipName)
 	cached, err := az.pipCache.Get(ctx, pipResourceGroup, crt)
 	if err != nil {
 		return nil, false, err
@@ -137,7 +134,6 @@ func (az *Cloud) getPublicIPAddress(ctx context.Context, pipResourceGroup string
 		pips = cached.(*sync.Map)
 		pip, ok = pips.Load(strings.ToLower(pipName))
 		if !ok {
-			logger.V(4).Info("pip not found")
 			return nil, false, nil
 		}
 	}
@@ -230,13 +226,4 @@ func getExpectedPIPFromListByIPAddress(pips []*armnetwork.PublicIPAddress, ip st
 	}
 
 	return nil, fmt.Errorf("getExpectedPIPFromListByIPAddress: cannot find public IP with IP address %s", ip)
-}
-
-func getPIPRGFromID(pipIDLower string) (string, error) {
-	re := regexp.MustCompile(strings.ToLower(`/subscriptions/(?:.*)/resourceGroups/(.+)/providers/Microsoft.Network/publicIPAddresses/(?:.*)`))
-	matches := re.FindStringSubmatch(pipIDLower)
-	if len(matches) != 2 {
-		return "", fmt.Errorf("failed to extract resource group name from public IP ID %s", pipIDLower)
-	}
-	return matches[1], nil
 }
