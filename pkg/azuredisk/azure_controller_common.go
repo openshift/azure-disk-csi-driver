@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 
@@ -374,7 +375,7 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 			// if host doesn't exist, no need to detach
 			klog.Warningf("azureDisk - failed to get azure instance id(%s), DetachDisk(%s) will assume disk is already detached",
 				nodeName, diskURI)
-			return nil
+			return c.waitForDiskManagedByTobeRemoved(ctx, diskURI, nodeName)
 		}
 		klog.Warningf("failed to get azure instance id (%v)", err)
 		return fmt.Errorf("failed to get azure instance id for node %q: %w", nodeName, err)
@@ -413,7 +414,7 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 				// if host doesn't exist, no need to detach
 				klog.Warningf("azureDisk - got InstanceNotFoundError(%v), DetachDisk(%s) will assume disk is already detached",
 					err, diskURI)
-				return nil
+				return c.waitForDiskManagedByTobeRemoved(ctx, diskURI, nodeName)
 			}
 			if c.ForceDetachBackoff && !azureutils.IsThrottlingError(err) {
 				klog.Errorf("azureDisk - DetachDisk(%s) from node %s failed with error: %v, retry with force detach", diskURI, nodeName, err)
@@ -424,6 +425,12 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 
 	if err != nil {
 		klog.Errorf("azureDisk - detach disk(%s, %s) failed, err: %v", diskName, diskURI, err)
+		return err
+	}
+
+	err = c.waitForDiskManagedByTobeRemoved(ctx, diskURI, nodeName)
+	if err != nil {
+		klog.Errorf("azureDisk - waitForDiskManagedByTobeRemoved(%s) failed, err: %v", diskURI, err)
 		return err
 	}
 
@@ -635,6 +642,52 @@ func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeN
 	return true
 }
 
+// For cases where an instance is deleted, we assume the disk is detached, but it actually
+// takes a while for disk property to be updated. We do not want to presume such disks to be detached
+// without waiting for disk to be actually detached.
+func (c *controllerCommon) waitForDiskManagedByTobeRemoved(ctx context.Context, diskURI string, nodeName types.NodeName) error {
+	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
+	if err != nil {
+		return err
+	}
+	klog.V(2).Infof("azureDisk - waitForDiskManagedByTobeRemoved: diskURI(%s)", diskURI)
+	var disk *armcompute.Disk
+	waitFunc := func(ctx context.Context) (bool, error) {
+		diskclient, err := c.clientFactory.GetDiskClientForSub(subsID)
+		if err != nil {
+			return false, fmt.Errorf("error making diskClient while verifying detach: %w", err)
+		}
+		disk, err = diskclient.Get(ctx, resourceGroup, diskName)
+		if err != nil {
+			return false, fmt.Errorf("error getting disk: %w", err)
+		}
+
+		if disk.ManagedBy == nil {
+			return true, nil
+		}
+		attachedNode, err := c.cloud.VMSet.GetNodeNameByProviderID(ctx, *disk.ManagedBy)
+		if err != nil {
+			if errors.Is(err, cloudprovider.InstanceNotFound) || isInstanceNotFoundError(err) {
+				klog.V(2).Infof("disk %s is still marked as attached to %s, but instance is not found; waiting for ManagedBy to be cleared", diskURI, *disk.ManagedBy)
+				return false, nil
+			}
+			return false, fmt.Errorf("error resolving node name from providerID %s: %w", *disk.ManagedBy, err)
+		}
+
+		if !strings.EqualFold(string(attachedNode), string(nodeName)) {
+			klog.Warningf("expected to be detached from node %s, but found attached to %s, assuming as detached from original node", nodeName, attachedNode)
+			return true, nil
+		}
+
+		return false, nil
+	}
+	err = kwait.ExponentialBackoffWithContext(ctx, defaultBackOff, waitFunc)
+	if err != nil && disk != nil && disk.ManagedBy != nil {
+		klog.Errorf("error in - waitForDiskManagedByTobeRemoved, disk %s still has ManagedBy (VM resource ID) %s", diskURI, *disk.ManagedBy)
+	}
+	return err
+}
+
 func getValidCreationData(subscriptionID, resourceGroup string, options *ManagedDiskOptions) (armcompute.CreationData, error) {
 	if options.SourceResourceID == "" {
 		return armcompute.CreationData{
@@ -676,6 +729,14 @@ func getValidCreationData(subscriptionID, resourceGroup string, options *Managed
 }
 
 func isInstanceNotFoundError(err error) bool {
+	var responseErr *azcore.ResponseError
+	if errors.As(err, &responseErr) {
+		// Azure SDK "not found" shape.
+		if responseErr.StatusCode == 404 {
+			return true
+		}
+	}
+
 	errMsg := strings.ToLower(err.Error())
 	if strings.Contains(errMsg, strings.ToLower(consts.VmssVMNotActiveErrorMessage)) {
 		return true

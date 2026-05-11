@@ -71,6 +71,10 @@ var (
 	}
 )
 
+const (
+	volumeAttachmentListTimeoutSeconds = 2
+)
+
 // CSIDriver defines the interface for a CSI driver.
 type CSIDriver interface {
 	csi.ControllerServer
@@ -560,7 +564,7 @@ func (d *DriverCore) getUsedLunsFromVolumeAttachments(ctx context.Context, nodeN
 	}
 
 	volumeAttachments, err := kubeClient.StorageV1().VolumeAttachments().List(ctx, metav1.ListOptions{
-		TimeoutSeconds: ptr.To(int64(2))})
+		TimeoutSeconds: ptr.To(int64(volumeAttachmentListTimeoutSeconds))})
 	if err != nil {
 		return nil, err
 	}

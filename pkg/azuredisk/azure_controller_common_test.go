@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	autorestmocks "github.com/Azure/go-autorest/autorest/mocks"
@@ -33,13 +34,18 @@ import (
 	"go.uber.org/mock/gomock"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/utils/ptr"
 
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/diskclient/mock_diskclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/mock_azclient"
 	mockvmclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient/mock_virtualmachineclient"
 	azcache "sigs.k8s.io/cloud-provider-azure/pkg/cache"
 	"sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
+
+const testManagedByValue = "some-vm"
 
 func TestCommonAttachDisk(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -241,9 +247,10 @@ func TestCommonDetachDisk(t *testing.T) {
 	for i, test := range testCases {
 		testCloud := provider.GetTestCloud(ctrl)
 		common := &controllerCommon{
-			cloud:              testCloud,
-			lockMap:            newLockMap(),
+			cloud:                              testCloud,
+			lockMap:                            newLockMap(),
 			ForceDetachBackoff: true,
+			clientFactory:      testCloud.ComputeClientFactory,
 		}
 		diskURI := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/disks/disk-name",
 			testCloud.SubscriptionID, testCloud.ResourceGroup)
@@ -257,8 +264,112 @@ func TestCommonDetachDisk(t *testing.T) {
 		}
 		mockVMClient.EXPECT().CreateOrUpdate(gomock.Any(), testCloud.ResourceGroup, gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
+		diskClient := mock_diskclient.NewMockInterface(ctrl)
+		testCloud.ComputeClientFactory.(*mock_azclient.MockClientFactory).EXPECT().GetDiskClientForSub(gomock.Any()).Return(diskClient, nil).AnyTimes()
+		diskClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(&armcompute.Disk{
+			ManagedBy: nil,
+		}, nil).AnyTimes()
+
 		err := common.DetachDisk(ctx, test.diskName, diskURI, test.nodeName)
 		assert.Equal(t, test.expectedErr, err != nil, "TestCase[%d]: %s, err: %v", i, test.desc, err)
+	}
+}
+
+func TestCommonDetachDiskInstanceNotFoundWaitForDiskManagedByRemoved(t *testing.T) {
+	oldBackOff := defaultBackOff
+	defaultBackOff = wait.Backoff{
+		Steps:    2,
+		Duration: 10 * time.Millisecond,
+		Factor:   1.0,
+		Jitter:   0.0,
+	}
+	defer func() {
+		defaultBackOff = oldBackOff
+	}()
+
+	managedBy := testManagedByValue
+	testCases := []struct {
+		desc               string
+		nodeName           types.NodeName
+		managedBy          *string
+		attachedNodeName   types.NodeName
+		getNodeNameByIDErr error
+		getErr             error
+		expectedErr        bool
+	}{
+		{
+			desc:        "no error when ManagedBy cleared",
+			nodeName:    "vm1",
+			managedBy:   nil,
+			expectedErr: false,
+		},
+		{
+			desc:        "error when disk get fails",
+			nodeName:    "vm1",
+			managedBy:   nil,
+			getErr:      errors.New("get disk error"),
+			expectedErr: true,
+		},
+		{
+			desc:             "error when ManagedBy remains set and resolves to same node",
+			nodeName:         "vm1",
+			managedBy:        &managedBy,
+			attachedNodeName: "vm1",
+			expectedErr:      true,
+		},
+		{
+			desc:             "error when ManagedBy remains set and resolves to same node with different casing",
+			nodeName:         "VM1",
+			managedBy:        &managedBy,
+			attachedNodeName: "vm1",
+			expectedErr:      true,
+		},
+		{
+			desc:             "no error when ManagedBy resolves to different node",
+			nodeName:         "vm1",
+			managedBy:        &managedBy,
+			attachedNodeName: "vm2",
+			expectedErr:      false,
+		},
+		{
+			desc:               "error when ManagedBy remains set and instance cannot be resolved",
+			nodeName:           "vm1",
+			managedBy:          &managedBy,
+			getNodeNameByIDErr: cloudprovider.InstanceNotFound,
+			expectedErr:        true,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			testCloud := provider.GetTestCloud(ctrl)
+			testCloud.UseInstanceMetadata = false
+			mockVMSet := provider.NewMockVMSet(ctrl)
+			testCloud.VMSet = mockVMSet
+			mockVMSet.EXPECT().GetInstanceIDByNodeName(gomock.Any(), gomock.Any()).Return("", cloudprovider.InstanceNotFound).AnyTimes()
+			if test.managedBy != nil && test.getErr == nil {
+				mockVMSet.EXPECT().GetNodeNameByProviderID(gomock.Any(), *test.managedBy).Return(test.attachedNodeName, test.getNodeNameByIDErr).AnyTimes()
+			}
+
+			diskClient := mock_diskclient.NewMockInterface(ctrl)
+			testCloud.ComputeClientFactory.(*mock_azclient.MockClientFactory).EXPECT().GetDiskClientForSub(gomock.Any()).Return(diskClient, nil).AnyTimes()
+			diskClient.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(&armcompute.Disk{
+				ManagedBy: test.managedBy,
+			}, test.getErr).AnyTimes()
+
+			common := &controllerCommon{
+				cloud:         testCloud,
+				lockMap:       newLockMap(),
+				clientFactory: testCloud.ComputeClientFactory,
+			}
+			diskURI := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/disks/disk-name",
+				testCloud.SubscriptionID, testCloud.ResourceGroup)
+			err := common.DetachDisk(t.Context(), "disk-name", diskURI, test.nodeName)
+			assert.Equal(t, test.expectedErr, err != nil, "err: %v", err)
+		})
 	}
 }
 
@@ -580,30 +691,55 @@ func TestGetValidCreationData(t *testing.T) {
 
 func TestIsInstanceNotFoundError(t *testing.T) {
 	testCases := []struct {
-		errMsg         string
+		desc           string
+		err            error
 		expectedResult bool
 	}{
 		{
-			errMsg:         "",
+			desc:           "empty error message",
+			err:            fmt.Errorf(""),
 			expectedResult: false,
 		},
 		{
-			errMsg:         "other error",
+			desc:           "unrelated error message",
+			err:            fmt.Errorf("other error"),
 			expectedResult: false,
 		},
 		{
-			errMsg:         "The provided instanceId 857 is not an active Virtual Machine Scale Set VM instanceId.",
+			desc:           "VMSS instance not active error message",
+			err:            fmt.Errorf("the provided instanceId 857 is not an active Virtual Machine Scale Set VM instanceId"),
 			expectedResult: true,
 		},
 		{
-			errMsg:         `compute.VirtualMachineScaleSetVMsClient#Update: Failure sending request: StatusCode=400 -- Original Error: Code="InvalidParameter" Message="The provided instanceId 1181 is not an active Virtual Machine Scale Set VM instanceId." Target="instanceIds"`,
+			desc:           "VMSS instance not active error wrapped in request failure",
+			err:            fmt.Errorf(`compute.VirtualMachineScaleSetVMsClient#Update: Failure sending request: StatusCode=400 -- Original Error: Code="InvalidParameter" Message="The provided instanceId 1181 is not an active Virtual Machine Scale Set VM instanceId." Target="instanceIds"`),
 			expectedResult: true,
+		},
+		{
+			desc: "Azure SDK ResponseError with 404 status code",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusNotFound,
+				RawResponse: &http.Response{
+					StatusCode: http.StatusNotFound,
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			desc: "Azure SDK ResponseError with non-404 status code",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				RawResponse: &http.Response{
+					StatusCode: http.StatusBadRequest,
+				},
+			},
+			expectedResult: false,
 		},
 	}
 
 	for i, test := range testCases {
-		result := isInstanceNotFoundError(fmt.Errorf("%v", test.errMsg))
-		assert.Equal(t, test.expectedResult, result, "TestCase[%d]", i, result)
+		result := isInstanceNotFoundError(test.err)
+		assert.Equal(t, test.expectedResult, result, "TestCase[%d]: %s", i, test.desc)
 	}
 }
 
