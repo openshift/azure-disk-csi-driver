@@ -22,13 +22,12 @@ package azuredisk
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"reflect"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -46,8 +45,6 @@ import (
 	volumehelper "sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	consts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 )
-
-var useDriverV2 = flag.Bool("temp-use-driver-v2", false, "A temporary flag to enable early test and development of Azure Disk CSI Driver V2. This will be removed in the future.")
 
 // DriverV2 implements all interfaces of CSI drivers
 type DriverV2 struct {

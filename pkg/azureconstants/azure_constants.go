@@ -105,8 +105,9 @@ const (
 	MaxThrottlingSleepSec           = 1200
 	AgentNotReadyNodeTaintKeySuffix = "/agent-not-ready"
 	// define tag value delimiter and default is comma
-	TagValueDelimiterField = "tagvaluedelimiter"
-	AzureDiskDriverTag     = "kubernetes-azure-dd"
+	TagValueDelimiterField       = "tagvaluedelimiter"
+	AzureDiskDriverTag           = "kubernetes-azure-dd"
+	InstantAccessDurationMinutes = "instantaccessdurationminutes"
 )
 
 var (
