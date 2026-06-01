@@ -323,7 +323,7 @@ github.com/microsoft/wmi/pkg/base/session
 github.com/microsoft/wmi/pkg/errors
 github.com/microsoft/wmi/pkg/wmiinstance
 github.com/microsoft/wmi/server2019/root/microsoft/windows/storage
-# github.com/moby/spdystream v0.5.0
+# github.com/moby/spdystream v0.5.1
 ## explicit; go 1.13
 github.com/moby/spdystream
 github.com/moby/spdystream/spdy
