@@ -119,7 +119,7 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `image.azuredisk.tag`                             | azuredisk-csi-driver container image tag                      | ``                                                       |
 | `image.azuredisk.pullPolicy`                      | azuredisk-csi-driver image pull policy                     | `IfNotPresent`                                                 |
 | `image.csiProvisioner.repository`                 | csi-provisioner container image                               | `/oss/kubernetes-csi/csi-provisioner`         |
-| `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v6.1.1`                                                       |
+| `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v6.2.0`                                                       |
 | `image.csiProvisioner.pullPolicy`                 | csi-provisioner image pull policy                          | `IfNotPresent`                                                 |
 | `image.csiAttacher.repository`                    | csi-attacher container image                                  | `/oss/kubernetes-csi/csi-attacher`            |
 | `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.11.0`                                                       |
@@ -193,6 +193,12 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `node.maxUnavailable`                             | `maxUnavailable` value of driver node daemonset            | `1`
 | `node.metricsPort`                          | metrics port of driver node daemonset                   | `29605`                                                        |
 | `node.livenessProbe.healthPort`                   | health check port for liveness probe                       | `29603` |
+| `node.nodeDriverRegistrar.healthPort`                        | health check port for node-driver-registrar liveness probe                                                 | `29607`                                                 |
+| `node.nodeDriverRegistrar.livenessProbe.enabled`             | enable node-driver-registrar liveness probe                                                                | `true`                                                  |
+| `node.nodeDriverRegistrar.livenessProbe.initialDelaySeconds` | node-driver-registrar liveness probe initialDelaySeconds                                                   | `20`                                                    |
+| `node.nodeDriverRegistrar.livenessProbe.timeoutSeconds`      | node-driver-registrar liveness probe timeoutSeconds                                                        | `10`                                                    |
+| `node.nodeDriverRegistrar.livenessProbe.periodSeconds`       | node-driver-registrar liveness probe periodSeconds                                                         | `20`                                                     |
+| `node.nodeDriverRegistrar.livenessProbe.failureThreshold`    | node-driver-registrar liveness probe failureThreshold                                                      | `2`                                                     |
 | `node.logLevel`                                   | node driver log level                                      |`5`                                                           |
 | `snapshot.enabled`                                | whether enable snapshot feature                            | `false`                                                        |
 | `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter container image                               | `/oss/kubernetes-csi/csi-snapshotter`         |

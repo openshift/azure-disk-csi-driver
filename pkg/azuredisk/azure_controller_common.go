@@ -108,6 +108,9 @@ type controllerCommon struct {
 	ForceDetachBackoff         bool
 	WaitForDetach              bool
 	CheckDiskCountForBatching  bool
+	// WaitForDetachDiskComplete controls whether detach waits until the disk is no longer managed by the detach target node:
+	// either disk.ManagedBy is cleared, or it remains set but points to a different node than the original detach target.
+	WaitForDetachDiskComplete bool
 	// a timed cache for disk attach hitting max data disk count, <nodeName, "">
 	hitMaxDataDiskCountCache azcache.Resource
 }
@@ -478,12 +481,6 @@ func (c *controllerCommon) DetachDisk(ctx context.Context, diskName, diskURI str
 		return err
 	}
 
-	err = c.waitForDiskManagedByTobeRemoved(ctx, diskURI, nodeName)
-	if err != nil {
-		klog.Errorf("azureDisk - waitForDiskManagedByTobeRemoved(%s) failed, err: %v", diskURI, err)
-		return err
-	}
-
 	if !c.DisableDiskLunCheck {
 		// always check disk lun after disk detach complete
 		return c.verifyDetach(ctx, diskName, diskURI, nodeName)
@@ -752,6 +749,11 @@ func (c *controllerCommon) isMaxDataDiskCountExceeded(ctx context.Context, nodeN
 // takes a while for disk property to be updated. We do not want to presume such disks to be detached
 // without waiting for disk to be actually detached.
 func (c *controllerCommon) waitForDiskManagedByTobeRemoved(ctx context.Context, diskURI string, nodeName types.NodeName) error {
+	if !c.WaitForDetachDiskComplete {
+		klog.V(2).Infof("azureDisk - skip waiting for detach disk completion on diskURI(%s)", diskURI)
+		return nil
+	}
+
 	subsID, resourceGroup, diskName, err := azureutils.GetInfoFromURI(diskURI)
 	if err != nil {
 		return err

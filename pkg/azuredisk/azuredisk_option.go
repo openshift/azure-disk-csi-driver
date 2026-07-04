@@ -64,6 +64,7 @@ type DriverOptions struct {
 	ForceDetachBackoff                 bool
 	CheckDiskCountForBatching          bool
 	WaitForDetach                      bool
+	WaitForDetachDiskComplete          bool
 	Kubeconfig                         string
 	Endpoint                           string
 	DisableAVSetNodes                  bool
@@ -75,6 +76,8 @@ type DriverOptions struct {
 	GoMaxProcs                         int64
 	EnableMigrationMonitor             bool
 	ConvertRWCachingModeForIntreePV    bool
+	KubeAPIQPS                         float64
+	KubeAPIBurst                       int
 }
 
 func (o *DriverOptions) AddFlags() *flag.FlagSet {
@@ -120,6 +123,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.BoolVar(&o.CheckDiskCountForBatching, "check-disk-count-for-batching", true, "boolean flag to check disk count before creating a batch for disk attach")
 	fs.BoolVar(&o.ForceDetachBackoff, "force-detach-backoff", true, "boolean flag to force detach in disk detach backoff")
 	fs.BoolVar(&o.WaitForDetach, "wait-for-detach", true, "boolean flag to wait for detach before attaching disk on the same node")
+	fs.BoolVar(&o.WaitForDetachDiskComplete, "wait-for-detach-disk-complete", true, "boolean flag to wait until disk ManagedBy is cleared or no longer refers to the original node after detach")
 	fs.StringVar(&o.Kubeconfig, "kubeconfig", "", "Absolute path to the kubeconfig file. Required only when running out of cluster.")
 	fs.BoolVar(&o.DisableAVSetNodes, "disable-avset-nodes", false, "disable DisableAvailabilitySetNodes in cloud config for controller")
 	fs.BoolVar(&o.RemoveNotReadyTaint, "remove-not-ready-taint", true, "remove NotReady taint from node when node is ready")
@@ -131,5 +135,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.Int64Var(&o.GoMaxProcs, "max-procs", 2, "maximum number of CPUs that can be executing simultaneously in golang runtime")
 	fs.BoolVar(&o.EnableMigrationMonitor, "enable-migration-monitor", true, "enable migration monitor for Azure Disk CSI Driver")
 	fs.BoolVar(&o.ConvertRWCachingModeForIntreePV, "convert-rw-caching-mode-for-intree-pv", false, "convert ReadWrite cachingMode to ReadOnly for intree PVs to avoid issues")
+	fs.Float64Var(&o.KubeAPIQPS, "kube-api-qps", 0, "QPS for kubernetes API client (0 uses default)")
+	fs.IntVar(&o.KubeAPIBurst, "kube-api-burst", 0, "Burst for kubernetes API client (0 uses default)")
 	return fs
 }
