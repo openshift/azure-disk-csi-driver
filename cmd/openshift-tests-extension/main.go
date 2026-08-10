@@ -41,14 +41,7 @@ func main() {
 	ext := e.NewExtension("openshift", "payload", "azure-disk-csi-driver-test")
 
 	ext.AddSuite(e.Suite{
-		Name:       "openshift/csi/azure-disk",
-		Parents:    []string{"openshift/conformance/parallel"},
-		Qualifiers: []string{`!labels.exists(l, l=="azure-disk-upstream")`},
-	})
-
-	ext.AddSuite(e.Suite{
-		Name:       "openshift/csi/azure-disk/upstream",
-		Qualifiers: []string{`labels.exists(l, l=="azure-disk-upstream")`},
+		Name: "openshift/csi/azure-disk/upstream",
 	})
 
 	specs, err := g.BuildExtensionTestSpecsFromOpenShiftGinkgoSuite()
@@ -68,12 +61,10 @@ func main() {
 	// Exclude cross-region snapshot tests (require location from BeforeSuite)
 	specs.Select(et.NameContains("snapshot cross region")).Exclude("true")
 
-	// Label tests that require Azure API credentials (not available in generic conformance jobs)
-	specs.Select(et.NameContains("azuredisk with tag")).AddLabel("azure-disk-upstream")
-	specs.Select(et.NameContains("detach disk")).AddLabel("azure-disk-upstream")
-	specs.Select(et.NameContains("separate resource group")).AddLabel("azure-disk-upstream")
-	specs.Select(et.NameContains("volume snapshot")).AddLabel("azure-disk-upstream")
-	specs.Select(et.NameContains("resize")).AddLabel("azure-disk-upstream")
+	// Label all tests as upstream azure-disk tests
+	specs.AddLabel("azure-disk-upstream")
+
+	specs.AddBeforeAll(populateAzureCredentialsFromCluster)
 
 	ext.AddSpecs(specs)
 	registry.Register(ext)
@@ -86,5 +77,72 @@ func main() {
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+// populateAzureCredentialsFromCluster reads Azure credentials from the
+// azure-cloud-provider secret in kube-system and sets the environment
+// variables that CreateAzureCredentialFile() expects. This allows tests
+// that make direct Azure API calls to work when running via OTE, where
+// BeforeSuite is not executed.
+func populateAzureCredentialsFromCluster() {
+	if os.Getenv("AZURE_TENANT_ID") != "" {
+		return
+	}
+
+	kubeconfigPath := os.Getenv("KUBECONFIG")
+	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		log.Printf("Warning: could not build kubeconfig for Azure credential extraction: %v", err)
+		return
+	}
+
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		log.Printf("Warning: could not create Kubernetes client for Azure credential extraction: %v", err)
+		return
+	}
+
+	secret, err := clientset.CoreV1().Secrets("kube-system").Get(
+		context.Background(), "azure-cloud-provider", metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Warning: could not read azure-cloud-provider secret: %v", err)
+		return
+	}
+
+	cloudConfigData := secret.Data["cloud-config"]
+	if len(cloudConfigData) == 0 {
+		log.Printf("Warning: azure-cloud-provider secret has no cloud-config data")
+		return
+	}
+
+	var cloudConfig struct {
+		TenantID              string `json:"tenantId"`
+		SubscriptionID        string `json:"subscriptionId"`
+		AADClientID           string `json:"aadClientId"`
+		AADClientSecret       string `json:"aadClientSecret"`
+		ResourceGroup         string `json:"resourceGroup"`
+		Location              string `json:"location"`
+		AADFederatedTokenFile string `json:"aadFederatedTokenFile"`
+	}
+	if err := json.Unmarshal(cloudConfigData, &cloudConfig); err != nil {
+		log.Printf("Warning: could not parse azure-cloud-provider cloud-config: %v", err)
+		return
+	}
+
+	setEnvIfEmpty("AZURE_TENANT_ID", cloudConfig.TenantID)
+	setEnvIfEmpty("AZURE_SUBSCRIPTION_ID", cloudConfig.SubscriptionID)
+	setEnvIfEmpty("AZURE_CLIENT_ID", cloudConfig.AADClientID)
+	setEnvIfEmpty("AZURE_CLIENT_SECRET", cloudConfig.AADClientSecret)
+	setEnvIfEmpty("AZURE_RESOURCE_GROUP", cloudConfig.ResourceGroup)
+	setEnvIfEmpty("AZURE_LOCATION", cloudConfig.Location)
+	setEnvIfEmpty("AZURE_FEDERATED_TOKEN_FILE", cloudConfig.AADFederatedTokenFile)
+
+	log.Printf("Azure credentials populated from cluster secret azure-cloud-provider in kube-system")
+}
+
+func setEnvIfEmpty(key, value string) {
+	if os.Getenv(key) == "" && value != "" {
+		os.Setenv(key, value)
 	}
 }
