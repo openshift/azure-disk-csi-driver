@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -13,6 +16,9 @@ import (
 	e "github.com/openshift-eng/openshift-tests-extension/pkg/extension"
 	g "github.com/openshift-eng/openshift-tests-extension/pkg/ginkgo"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/config"
 
@@ -35,8 +41,14 @@ func main() {
 	ext := e.NewExtension("openshift", "payload", "azure-disk-csi-driver-test")
 
 	ext.AddSuite(e.Suite{
-		Name:    "openshift/csi/azure-disk",
-		Parents: []string{"openshift/conformance/parallel"},
+		Name:       "openshift/csi/azure-disk",
+		Parents:    []string{"openshift/conformance/parallel"},
+		Qualifiers: []string{`!labels.exists(l, l=="azure-disk-upstream")`},
+	})
+
+	ext.AddSuite(e.Suite{
+		Name:       "openshift/csi/azure-disk/upstream",
+		Qualifiers: []string{`labels.exists(l, l=="azure-disk-upstream")`},
 	})
 
 	specs, err := g.BuildExtensionTestSpecsFromOpenShiftGinkgoSuite()
@@ -55,6 +67,13 @@ func main() {
 
 	// Exclude cross-region snapshot tests (require location from BeforeSuite)
 	specs.Select(et.NameContains("snapshot cross region")).Exclude("true")
+
+	// Label tests that require Azure API credentials (not available in generic conformance jobs)
+	specs.Select(et.NameContains("azuredisk with tag")).AddLabel("azure-disk-upstream")
+	specs.Select(et.NameContains("detach disk")).AddLabel("azure-disk-upstream")
+	specs.Select(et.NameContains("separate resource group")).AddLabel("azure-disk-upstream")
+	specs.Select(et.NameContains("volume snapshot")).AddLabel("azure-disk-upstream")
+	specs.Select(et.NameContains("resize")).AddLabel("azure-disk-upstream")
 
 	ext.AddSpecs(specs)
 	registry.Register(ext)
