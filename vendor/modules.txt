@@ -680,7 +680,7 @@ go.uber.org/zap/zapgrpc
 # go.yaml.in/yaml/v2 v2.4.2
 ## explicit; go 1.15
 go.yaml.in/yaml/v2
-# golang.org/x/crypto v0.46.0
+# golang.org/x/crypto v0.47.0 => github.com/openshift-sustaining/crypto v0.48.0-sec.2
 ## explicit; go 1.24.0
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -699,7 +699,7 @@ golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 # golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
 ## explicit; go 1.23.0
 golang.org/x/exp/slices
-# golang.org/x/net v0.48.0
+# golang.org/x/net v0.49.0
 ## explicit; go 1.24.0
 golang.org/x/net/context
 golang.org/x/net/html
@@ -723,17 +723,17 @@ golang.org/x/oauth2/internal
 ## explicit; go 1.24.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.39.0
+# golang.org/x/sys v0.41.0
 ## explicit; go 1.24.0
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/term v0.38.0
+# golang.org/x/term v0.40.0
 ## explicit; go 1.24.0
 golang.org/x/term
-# golang.org/x/text v0.32.0
+# golang.org/x/text v0.34.0
 ## explicit; go 1.24.0
 golang.org/x/text/cases
 golang.org/x/text/encoding
@@ -767,7 +767,7 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.12.0
 ## explicit; go 1.23.0
 golang.org/x/time/rate
-# golang.org/x/tools v0.39.0
+# golang.org/x/tools v0.41.0
 ## explicit; go 1.24.0
 golang.org/x/tools/cover
 golang.org/x/tools/go/ast/edge
@@ -2057,3 +2057,4 @@ sigs.k8s.io/yaml/goyaml.v2
 # sigs.k8s.io/cloud-provider-azure => github.com/openshift/cloud-provider-azure v0.7.5-0.20260324140117-f3b640ea4757
 # sigs.k8s.io/cloud-provider-azure/pkg/azclient => github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20260324140117-f3b640ea4757
 # sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader => github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20260324140117-f3b640ea4757
+# golang.org/x/crypto => github.com/openshift-sustaining/crypto v0.48.0-sec.2
