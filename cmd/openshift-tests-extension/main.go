@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -81,7 +80,7 @@ func main() {
 }
 
 // populateAzureCredentialsFromCluster reads Azure credentials from the
-// azure-cloud-provider secret in kube-system and sets the environment
+// azure-credentials secret in kube-system and sets the environment
 // variables that CreateAzureCredentialFile() expects. This allows tests
 // that make direct Azure API calls to work when running via OTE, where
 // BeforeSuite is not executed.
@@ -104,41 +103,28 @@ func populateAzureCredentialsFromCluster() {
 	}
 
 	secret, err := clientset.CoreV1().Secrets("kube-system").Get(
-		context.Background(), "azure-cloud-provider", metav1.GetOptions{})
+		context.Background(), "azure-credentials", metav1.GetOptions{})
 	if err != nil {
-		log.Printf("Warning: could not read azure-cloud-provider secret: %v", err)
+		log.Printf("Warning: could not read azure-credentials secret: %v", err)
 		return
 	}
 
-	cloudConfigData := secret.Data["cloud-config"]
-	if len(cloudConfigData) == 0 {
-		log.Printf("Warning: azure-cloud-provider secret has no cloud-config data")
-		return
+	keyToEnv := map[string]string{
+		"azure_tenant_id":       "AZURE_TENANT_ID",
+		"azure_subscription_id": "AZURE_SUBSCRIPTION_ID",
+		"azure_client_id":       "AZURE_CLIENT_ID",
+		"azure_client_secret":   "AZURE_CLIENT_SECRET",
+		"azure_resourcegroup":   "AZURE_RESOURCE_GROUP",
+		"azure_region":          "AZURE_LOCATION",
 	}
 
-	var cloudConfig struct {
-		TenantID              string `json:"tenantId"`
-		SubscriptionID        string `json:"subscriptionId"`
-		AADClientID           string `json:"aadClientId"`
-		AADClientSecret       string `json:"aadClientSecret"`
-		ResourceGroup         string `json:"resourceGroup"`
-		Location              string `json:"location"`
-		AADFederatedTokenFile string `json:"aadFederatedTokenFile"`
-	}
-	if err := json.Unmarshal(cloudConfigData, &cloudConfig); err != nil {
-		log.Printf("Warning: could not parse azure-cloud-provider cloud-config: %v", err)
-		return
+	for secretKey, envVar := range keyToEnv {
+		if val, ok := secret.Data[secretKey]; ok {
+			setEnvIfEmpty(envVar, string(val))
+		}
 	}
 
-	setEnvIfEmpty("AZURE_TENANT_ID", cloudConfig.TenantID)
-	setEnvIfEmpty("AZURE_SUBSCRIPTION_ID", cloudConfig.SubscriptionID)
-	setEnvIfEmpty("AZURE_CLIENT_ID", cloudConfig.AADClientID)
-	setEnvIfEmpty("AZURE_CLIENT_SECRET", cloudConfig.AADClientSecret)
-	setEnvIfEmpty("AZURE_RESOURCE_GROUP", cloudConfig.ResourceGroup)
-	setEnvIfEmpty("AZURE_LOCATION", cloudConfig.Location)
-	setEnvIfEmpty("AZURE_FEDERATED_TOKEN_FILE", cloudConfig.AADFederatedTokenFile)
-
-	log.Printf("Azure credentials populated from cluster secret azure-cloud-provider in kube-system")
+	log.Printf("Azure credentials populated from cluster secret azure-credentials in kube-system")
 }
 
 func setEnvIfEmpty(key, value string) {
