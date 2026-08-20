@@ -31,9 +31,9 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.35.0
 	go.opentelemetry.io/otel/sdk v1.39.0
 	go.uber.org/mock v0.5.2
-	golang.org/x/net v0.48.0
+	golang.org/x/net v0.49.0
 	golang.org/x/sync v0.19.0
-	golang.org/x/sys v0.39.0
+	golang.org/x/sys v0.41.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.10
 	k8s.io/api v0.33.2
@@ -156,13 +156,13 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/term v0.38.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/term v0.40.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	golang.org/x/tools v0.39.0 // indirect
+	golang.org/x/tools v0.41.0 // indirect
 	google.golang.org/genproto v0.0.0-20240227224415-6ceb2ff114de // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
@@ -226,3 +226,5 @@ replace (
 	sigs.k8s.io/cloud-provider-azure/pkg/azclient => github.com/openshift/cloud-provider-azure/pkg/azclient v0.0.0-20260324140117-f3b640ea4757
 	sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader => github.com/openshift/cloud-provider-azure/pkg/azclient/configloader v0.0.0-20260324140117-f3b640ea4757
 )
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.50.0-sec.4
