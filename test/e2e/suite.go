@@ -52,6 +52,12 @@ var (
 	supportsZRS               bool
 )
 
+// SetAzureDiskDriver allows external callers (e.g. OTE) to initialize the
+// in-process CSI driver used by pre-provisioned and retain-reclaim tests.
+func SetAzureDiskDriver(d azuredisk.CSIDriver) {
+	azurediskDriver = d
+}
+
 type testCmd struct {
 	command  string
 	args     []string
