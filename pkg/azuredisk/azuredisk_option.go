@@ -18,6 +18,10 @@ package azuredisk
 
 import (
 	"flag"
+	"fmt"
+	"strings"
+
+	"k8s.io/component-base/featuregate"
 
 	consts "sigs.k8s.io/azuredisk-csi-driver/pkg/azureconstants"
 )
@@ -37,6 +41,7 @@ type DriverOptions struct {
 	UseCSIProxyGAInterface     bool
 	EnableOtelTracing          bool
 	EnableMinimumRetryAfter    bool
+	FeatureGates               featuregate.MutableFeatureGate
 
 	//only used in v1
 	EnableDiskOnlineResize             bool
@@ -85,6 +90,9 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 		return nil
 	}
 	fs := flag.NewFlagSet("", flag.ExitOnError)
+	if o.FeatureGates == nil {
+		o.FeatureGates = NewDriverFeatureGate()
+	}
 	fs.StringVar(&o.NodeID, "nodeid", "", "node id")
 	fs.StringVar(&o.DriverName, "drivername", consts.DefaultDriverName, "name of the driver")
 	fs.Int64Var(&o.VolumeAttachLimit, "volume-attach-limit", -1, "maximum number of attachable volumes per node")
@@ -97,6 +105,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.BoolVar(&o.UseCSIProxyGAInterface, "use-csiproxy-ga-interface", true, "boolean flag to enable csi-proxy GA interface on Windows")
 	fs.BoolVar(&o.EnableOtelTracing, "enable-otel-tracing", false, "If set, enable opentelemetry tracing for the driver. The tracing is disabled by default. Configure the exporter endpoint with OTEL_EXPORTER_OTLP_ENDPOINT and other env variables, see https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#general-sdk-configuration.")
 	fs.BoolVar(&o.EnableMinimumRetryAfter, "enable-minimum-retry-after", true, "boolean flag to enable minimum retry after policy in azclient")
+	fs.Var(&goFlagFeatureGate{gate: o.FeatureGates}, "feature-gates", fmt.Sprintf("A set of Azure Disk CSI driver feature gates in key=value form. Known features: %s", strings.Join(o.FeatureGates.KnownFeatures(), ", ")))
 	//only used in v1
 	fs.BoolVar(&o.EnableDiskOnlineResize, "enable-disk-online-resize", true, "boolean flag to enable disk online resize")
 	fs.BoolVar(&o.AllowEmptyCloudConfig, "allow-empty-cloud-config", true, "Whether allow running driver without cloud config")
@@ -109,7 +118,7 @@ func (o *DriverOptions) AddFlags() *flag.FlagSet {
 	fs.Int64Var(&o.TrafficManagerPort, "traffic-manager-port", 7788, "default traffic manager port")
 	fs.Int64Var(&o.AttachDetachInitialDelayInMs, "attach-detach-initial-delay-ms", 1000, "initial delay in milliseconds for batch disk attach/detach")
 	fs.Int64Var(&o.DetachOperationMinTimeoutInSeconds, "detach-operation-min-timeout-seconds", 240, "minimum detach operation timeout in seconds")
-	fs.Int64Var(&o.VMSSDetachTimeoutInSeconds, "vmss-detach-timeout-seconds", 20, "per-operation timeout in seconds for VMSS disk detach API calls before falling back to polling the Get VM to verify detach status; increase this value if VMSS detach requests frequently time ou")
+	fs.Int64Var(&o.VMSSDetachTimeoutInSeconds, "vmss-detach-timeout-seconds", defaultVMSSDetachTimeoutInSeconds, "per-operation timeout in seconds for VMSS disk detach API calls before falling back to polling the Get VM to verify detach status; increase this value if VMSS detach requests frequently time out")
 	fs.Int64Var(&o.VMSSCacheTTLInSeconds, "vmss-cache-ttl-seconds", -1, "vmss cache TTL in seconds (600 by default)")
 	fs.BoolVar(&o.ListVMSSWithInstanceView, "list-vmss-with-instance-view", false, "boolean flag to enable vmss cache with instance view")
 	fs.Int64Var(&o.VolStatsCacheExpireInMinutes, "vol-stats-cache-expire-in-minutes", 10, "The cache expire time in minutes for volume stats cache")

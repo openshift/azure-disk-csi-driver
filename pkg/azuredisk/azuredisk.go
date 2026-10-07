@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
@@ -36,17 +38,26 @@ import (
 
 	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/mount-utils"
 	"k8s.io/utils/ptr"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/metadata/metadatainformer"
 
 	consts "sigs.k8s.io/azuredisk-csi-driver/pkg/azureconstants"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
@@ -61,6 +72,9 @@ import (
 )
 
 var (
+	errPVNotFound            = errors.New("persistent volume not found")
+	errPVMetadataUnavailable = errors.New("persistent volume metadata is unavailable")
+
 	// taintRemovalBackoff is the exponential backoff configuration for node taint removal
 	taintRemovalBackoff = wait.Backoff{
 		Duration: 500 * time.Millisecond,
@@ -71,6 +85,7 @@ var (
 
 const (
 	volumeAttachmentListTimeoutSeconds = 2
+	informerCacheSyncTimeout           = 30 * time.Second
 )
 
 // CSIDriver defines the interface for a CSI driver.
@@ -143,10 +158,16 @@ type Driver struct {
 	removeNotReadyTaint                bool
 	neverStopTaintRemoval              bool
 	kubeClient                         clientset.Interface
+	enableKataMount                    bool
+	kataDirectVolume                   kataDirectVolumer
 	// a timed cache storing volume stats <volumeID, volumeStats>
 	volStatsCache           azcache.Resource
 	maxConcurrentFormat     int64
 	concurrentFormatTimeout int64
+	// formatSem limits the number of concurrent mkfs operations, mirroring
+	// mount.SafeFormatAndMount's WithMaxConcurrentFormat semaphore. nil means unlimited.
+	formatSem               chan any
+	formatTimeout           time.Duration
 	enableMinimumRetryAfter bool
 	volumeLocks             *volumehelper.VolumeLocks
 	// a timed cache for throttling
@@ -156,12 +177,33 @@ type Driver struct {
 	enableMigrationMonitor      bool
 	// whether to convert ReadWrite cachingMode to ReadOnly for intree PVs to avoid issues
 	convertRWCachingModeForIntreePV bool
+	nodeLister                      cache.GenericLister
+	nodeInformerSynced              cache.InformerSynced
+	nodeInformerFactory             metadatainformer.SharedInformerFactory
+	// HTTP client for wireserver calls
+	httpClient *http.Client
+	// nodeDrivenAttachDetachEnabled controls adoption of the Alpha node-driven attach/detach architecture.
+	nodeDrivenAttachDetachEnabled bool
+	// informer factory and PV lister for cached API access
+	informerFactory informers.SharedInformerFactory
+	pvLister        corelisters.PersistentVolumeLister
+	pvListerSynced  cache.InformerSynced
+	// pvIndexer resolves a disk URI to its PV without listing every PV
+	pvIndexer cache.Indexer
+	// owning AKS cluster ARM ID, resolved once from node resource group tags and reused thereafter
+	clusterResourceID     string
+	clusterResourceIDLock sync.Mutex
+	// interval between Azure async operation polls; defaults to 5s when unset
+	pollInterval time.Duration
 }
 
 // NewDriver Creates a NewCSIDriver object. Assumes vendor version is equal to driver version &
 // does not support optional driver plugin info manifest field. Refer to CSI spec for more details.
 func NewDriver(options *DriverOptions) *Driver {
 	driver := Driver{}
+	if options.FeatureGates == nil {
+		options.FeatureGates = NewDriverFeatureGate()
+	}
 	driver.Name = options.DriverName
 	driver.Version = driverVersion
 	driver.NodeID = options.NodeID
@@ -206,10 +248,23 @@ func NewDriver(options *DriverOptions) *Driver {
 	driver.neverStopTaintRemoval = options.NeverStopTaintRemoval
 	driver.maxConcurrentFormat = options.MaxConcurrentFormat
 	driver.concurrentFormatTimeout = options.ConcurrentFormatTimeout
+	if options.MaxConcurrentFormat > 0 {
+		driver.formatSem = make(chan any, int(options.MaxConcurrentFormat))
+		driver.formatTimeout = time.Duration(options.ConcurrentFormatTimeout) * time.Second
+	}
 	driver.enableMinimumRetryAfter = options.EnableMinimumRetryAfter
+	driver.nodeDrivenAttachDetachEnabled = options.FeatureGates.Enabled(NodeDrivenAttachDetach)
+	if driver.nodeDrivenAttachDetachEnabled {
+		klog.Warningf("Alpha feature gate %s is enabled", NodeDrivenAttachDetach)
+	}
 	driver.volumeLocks = volumehelper.NewVolumeLocks()
 	driver.ioHandler = azureutils.NewOSIOHandler()
 	driver.hostUtil = hostutil.NewHostUtil()
+	driver.enableKataMount = options.FeatureGates.Enabled(KataMount)
+	if driver.enableKataMount {
+		klog.Warningf("Alpha feature gate %s is enabled", KataMount)
+	}
+	driver.kataDirectVolume = &kataDirectVolume{}
 	driver.enableMigrationMonitor = options.EnableMigrationMonitor
 	driver.convertRWCachingModeForIntreePV = options.ConvertRWCachingModeForIntreePV
 
@@ -238,11 +293,28 @@ func NewDriver(options *DriverOptions) *Driver {
 	userAgent := GetUserAgent(driver.Name, driver.customUserAgent, driver.userAgentSuffix)
 	klog.V(2).Infof("driver userAgent: %s", userAgent)
 
-	kubeClient, err := azureutils.GetKubeClient(options.Kubeconfig, options.KubeAPIQPS, options.KubeAPIBurst)
+	kubeConfig, err := azureutils.GetKubeConfig(options.Kubeconfig, options.KubeAPIQPS, options.KubeAPIBurst)
 	if err != nil {
 		klog.Warningf("get kubeconfig(%s) failed with error: %v", options.Kubeconfig, err)
 	}
+	var kubeClient clientset.Interface
+	if kubeConfig != nil {
+		kubeClient, err = clientset.NewForConfig(kubeConfig)
+		if err != nil {
+			klog.Warningf("get kubeclient failed with error: %v", err)
+		}
+	}
 	driver.kubeClient = kubeClient
+
+	if driver.NodeID != "" {
+		// Initialize HTTP client for wireserver calls (node component only)
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		driver.httpClient = &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		}
+	}
 
 	cloud, err := azureutils.GetCloudProviderFromClient(context.Background(), kubeClient, driver.cloudConfigSecretName, driver.cloudConfigSecretNamespace,
 		userAgent, driver.allowEmptyCloudConfig, driver.enableTrafficManager, driver.enableMinimumRetryAfter, driver.trafficManagerPort)
@@ -305,7 +377,7 @@ func NewDriver(options *DriverOptions) *Driver {
 				klog.V(2).Infof("reset VMSSDetachTimeoutInSeconds as DetachOperationMinTimeoutInSeconds %d with no additional polling", driver.diskController.DetachOperationMinTimeoutInSeconds)
 				driver.diskController.VMSSDetachTimeoutInSeconds = driver.diskController.DetachOperationMinTimeoutInSeconds
 			} else {
-				klog.V(2).Infof("reset VMSSDetachTimeoutInSeconds as 20 (default)")
+				klog.V(2).Infof("reset VMSSDetachTimeoutInSeconds as %d (default)", defaultVMSSDetachTimeoutInSeconds)
 				driver.diskController.VMSSDetachTimeoutInSeconds = defaultVMSSDetachTimeoutInSeconds
 			}
 		}
@@ -332,6 +404,23 @@ func NewDriver(options *DriverOptions) *Driver {
 					time.Sleep(10 * time.Minute)
 				}
 			}()
+		}
+	}
+
+	if kubeConfig != nil && driver.checkDiskCountForBatching && driver.NodeID == "" {
+		// Create a metadata-only node informer to cache node labels locally (controller only)
+		metadataClient, err := metadata.NewForConfig(kubeConfig)
+		if err != nil {
+			klog.Warningf("failed to create metadata client: %v, node informer will not be used", err)
+		} else {
+			driver.nodeInformerFactory = metadatainformer.NewSharedInformerFactory(metadataClient, 0)
+			nodeGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
+			nodeInformer := driver.nodeInformerFactory.ForResource(nodeGVR)
+			driver.nodeLister = nodeInformer.Lister()
+			driver.nodeInformerSynced = nodeInformer.Informer().HasSynced
+			if driver.diskController != nil {
+				driver.diskController.nodeLister = driver.nodeLister
+			}
 		}
 	}
 
@@ -380,6 +469,8 @@ func NewDriver(options *DriverOptions) *Driver {
 		csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
 	})
 
+	driver.initializePVInformer(kubeClient)
+
 	if kubeClient != nil && driver.removeNotReadyTaint && driver.NodeID != "" {
 		// Remove taint from node to indicate driver startup success
 		// This is done at the last possible moment to prevent race conditions or false positive removals
@@ -388,6 +479,32 @@ func NewDriver(options *DriverOptions) *Driver {
 		})
 	}
 	return &driver
+}
+
+func (d *Driver) initializePVInformer(kubeClient clientset.Interface) {
+	if kubeClient == nil || !d.nodeDrivenAttachDetachEnabled {
+		return
+	}
+
+	d.informerFactory = informers.NewSharedInformerFactory(kubeClient, 10*time.Minute)
+	pvInformer := d.informerFactory.Core().V1().PersistentVolumes()
+	if err := pvInformer.Informer().AddIndexers(cache.Indexers{pvDiskURIIndex: pvDiskURIIndexFunc}); err != nil {
+		klog.Warningf("failed to add diskURI indexer to PV informer, will fall back to API list: %v", err)
+	} else {
+		d.pvIndexer = pvInformer.Informer().GetIndexer()
+	}
+	d.pvLister = pvInformer.Lister()
+	d.pvListerSynced = pvInformer.Informer().HasSynced
+}
+
+func (d *Driver) waitForPVInformerCacheSync(ctx context.Context, timeout time.Duration) bool {
+	syncCtx, syncCancel := context.WithTimeout(ctx, timeout)
+	defer syncCancel()
+	if !cache.WaitForCacheSync(syncCtx.Done(), d.pvListerSynced) {
+		d.pvIndexer = nil
+		return false
+	}
+	return true
 }
 
 // Run driver initialization
@@ -423,13 +540,46 @@ func (d *Driver) Run(ctx context.Context) error {
 	csi.RegisterControllerServer(s, d)
 	csi.RegisterNodeServer(s, d)
 
+	// Start the node informer if it was set up during driver initialization
+	if d.nodeInformerFactory != nil {
+		d.nodeInformerFactory.Start(ctx.Done())
+		syncCtx, syncCancel := context.WithTimeout(ctx, informerCacheSyncTimeout)
+		defer syncCancel()
+		if !cache.WaitForCacheSync(syncCtx.Done(), d.nodeInformerSynced) {
+			klog.Warningf("metadata node informer cache has not synced yet, will continue to sync in background")
+		} else {
+			klog.V(2).Infof("metadata node informer cache synced successfully")
+		}
+		klog.V(2).Infof("started metadata node informer for GetNodeInfoFromLabels caching")
+	}
+
+	// Start informer factory if initialized
+	if d.informerFactory != nil {
+		d.informerFactory.Start(ctx.Done())
+		if !d.waitForPVInformerCacheSync(ctx, informerCacheSyncTimeout) {
+			klog.Warningf("PV informer cache has not synced, falling back to direct API access")
+		} else {
+			klog.V(2).Infof("PV informer cache synced successfully")
+		}
+	}
+
 	go func() {
 		//graceful shutdown
 		<-ctx.Done()
 
+		// Shutdown informer factory
+		if d.informerFactory != nil {
+			d.informerFactory.Shutdown()
+		}
+
 		// Stop migration monitor if it exists
 		if d.migrationMonitor != nil {
 			d.migrationMonitor.Stop()
+		}
+
+		// Shutdown node informer if it was started
+		if d.nodeInformerFactory != nil {
+			d.nodeInformerFactory.Shutdown()
 		}
 
 		s.GracefulStop()
@@ -675,6 +825,126 @@ func (d *Driver) getUsedLunsFromNode(ctx context.Context, nodeName k8stypes.Node
 	return usedLuns, nil
 }
 
+// GetNodeInfoFromNodeLister gets zone, instanceType from node labels using the cached nodeLister.
+func GetNodeInfoFromNodeLister(nodeName string, nodeLister cache.GenericLister) (string, string, error) {
+	if nodeLister == nil {
+		return "", "", fmt.Errorf("nodeLister is nil")
+	}
+
+	obj, err := nodeLister.Get(nodeName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(4).Infof("GetNodeInfoFromNodeLister: node(%s) not found in lister cache", nodeName)
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("get node(%s) from lister failed: %v", nodeName, err)
+	}
+
+	pom, ok := obj.(*metav1.PartialObjectMetadata)
+	if !ok {
+		return "", "", fmt.Errorf("node(%s) from lister is not *metav1.PartialObjectMetadata", nodeName)
+	}
+
+	if len(pom.Labels) == 0 {
+		return "", "", fmt.Errorf("node(%s) label is empty", nodeName)
+	}
+
+	zone := pom.Labels[consts.WellKnownTopologyKey]
+	instanceType := pom.Labels[consts.InstanceTypeKey]
+	klog.V(4).Infof("GetNodeInfoFromNodeLister: node(%s): zone=%s, instanceType=%s", nodeName, zone, instanceType)
+	return zone, instanceType, nil
+}
+
+// pvDiskURIIndex is the informer index that maps a PV to its CSI disk URI
+// (volume handle) for O(1) lookups in getPVFromDiskURI.
+const pvDiskURIIndex = "diskURI"
+
+// pvDiskURIIndexFunc indexes PersistentVolumes by their lowercased CSI volume
+// handle so a disk URI resolves to its PV without listing every PV.
+func pvDiskURIIndexFunc(obj interface{}) ([]string, error) {
+	pv, ok := obj.(*v1.PersistentVolume)
+	if !ok || pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle == "" {
+		return nil, nil
+	}
+	return []string{strings.ToLower(pv.Spec.CSI.VolumeHandle)}, nil
+}
+
+func (d *Driver) getPVFromDiskURI(ctx context.Context, diskURI string) (*v1.PersistentVolume, error) {
+	klog.Infof("Looking for PV with handle %s", diskURI)
+
+	if d.kubeClient == nil {
+		return nil, fmt.Errorf("%w: Kubernetes client is not initialized", errPVMetadataUnavailable)
+	}
+
+	// Use the cache only to identify a candidate PV name. QAD routing depends on
+	// current annotations, so always read the candidate from the API.
+	if d.pvIndexer != nil {
+		objs, err := d.pvIndexer.ByIndex(pvDiskURIIndex, strings.ToLower(diskURI))
+		if err != nil {
+			klog.Warningf("failed to look up PersistentVolume by disk URI from cache, falling back to API list: %v", err)
+		} else {
+			for _, obj := range objs {
+				candidate, ok := obj.(*v1.PersistentVolume)
+				if !ok || candidate.Name == "" || candidate.Spec.CSI == nil || candidate.Spec.CSI.Driver != d.Name ||
+					!strings.EqualFold(candidate.Spec.CSI.VolumeHandle, diskURI) {
+					continue
+				}
+				pv, getErr := d.kubeClient.CoreV1().PersistentVolumes().Get(ctx, candidate.Name, metav1.GetOptions{})
+				if getErr != nil {
+					if apierrors.IsNotFound(getErr) {
+						break
+					}
+					return nil, fmt.Errorf("failed to get PersistentVolume %s: %v", candidate.Name, getErr)
+				}
+				if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == d.Name &&
+					strings.EqualFold(pv.Spec.CSI.VolumeHandle, diskURI) {
+					klog.Infof("Found PV %s with handle %s (refreshed from API)", pv.Name, diskURI)
+					return pv, nil
+				}
+				break
+			}
+		}
+	}
+
+	// The informer may not have observed a newly created PV yet.
+	pvList, err := d.kubeClient.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PersistentVolumes: %v", err)
+	}
+	for _, pv := range pvList.Items {
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == d.Name &&
+			strings.EqualFold(pv.Spec.CSI.VolumeHandle, diskURI) {
+			klog.Infof("Found PV %s with handle %s", pv.Name, diskURI)
+			return &pv, nil
+		}
+	}
+	return nil, fmt.Errorf("%w with diskURI(%s)", errPVNotFound, diskURI)
+}
+
+// hasQADInfo reports whether the PV carries the QAD adoption marker (the
+// attach-sequence annotation) that selects the node-driven attach/detach path.
+func (d *Driver) hasQADInfo(pv *v1.PersistentVolume) bool {
+	if pv == nil {
+		klog.V(2).Infof("PV is nil")
+		return false
+	}
+
+	pvName := pv.Name
+	if pvName == "" {
+		klog.V(2).Infof("PV name is empty")
+		return false
+	}
+
+	// The attach-sequence annotation, seeded during controller-side adoption, is
+	// the signal that this PV uses the QAD attach/detach path.
+	if attachSequence, exists := pv.Annotations[consts.AttachSequenceAnnotation]; exists {
+		klog.V(2).Infof("Found PV %s with attach sequence: %s", pvName, attachSequence)
+		return true
+	}
+	klog.V(2).Infof("Found PV %s but no QAD configuration", pvName)
+	return false
+}
+
 // getNodeInfoFromLabels get zone, instanceType from node labels
 func GetNodeInfoFromLabels(ctx context.Context, nodeName string, kubeClient clientset.Interface) (string, string, error) {
 	if kubeClient == nil || kubeClient.CoreV1() == nil {
@@ -689,7 +959,11 @@ func GetNodeInfoFromLabels(ctx context.Context, nodeName string, kubeClient clie
 	if len(node.Labels) == 0 {
 		return "", "", fmt.Errorf("node(%s) label is empty", nodeName)
 	}
-	return node.Labels[consts.WellKnownTopologyKey], node.Labels[consts.InstanceTypeKey], nil
+
+	zone := node.Labels[consts.WellKnownTopologyKey]
+	instanceType := node.Labels[consts.InstanceTypeKey]
+	klog.V(4).Infof("GetNodeInfoFromLabels: node(%s) from API server: zone=%s, instanceType=%s", nodeName, zone, instanceType)
+	return zone, instanceType, nil
 }
 
 // getDefaultDiskIOPSReadWrite according to requestGiB

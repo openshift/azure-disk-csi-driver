@@ -40,8 +40,18 @@
 
 ### add the Helm chart repository
 
+Pick **one** source (both host the same charts; the two commands share the repo name `azuredisk-csi-driver`, so running the second after the first will fail unless you pass `--force-update`):
+
+Option 1: raw.githubusercontent.com (default)
+
 ```console
 helm repo add azuredisk-csi-driver https://raw.githubusercontent.com/kubernetes-sigs/azuredisk-csi-driver/master/charts
+```
+
+Option 2: GitHub Pages mirror (available since 1.33.7, not affected by raw.githubusercontent.com rate limits)
+
+```console
+helm repo add azuredisk-csi-driver https://kubernetes-sigs.github.io/azuredisk-csi-driver
 ```
 
 ### search for all available chart versions
@@ -61,7 +71,7 @@ helm repo update azuredisk-csi-driver
 ### install a specific version
 
 ```console
-helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version 1.33.7
+helm install azuredisk-csi-driver azuredisk-csi-driver/azuredisk-csi-driver --namespace kube-system --version 1.34.5
 ```
 
 ### install on Azure Stack
@@ -114,24 +124,25 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `driver.volumeAttachLimit`                        | maximum number of attachable volumes per node maximum number is defined according to node instance type by default(`-1`)                        | `-1` |
 | `driver.azureGoSDKLogLevel`                       | [Azure go sdk log level](https://github.com/Azure/azure-sdk-for-go/blob/main/documentation/previous-versions-quickstart.md#built-in-basic-requestresponse-logging)  | ``(no logs), `DEBUG`, `INFO`, `WARNING`, `ERROR`, [etc](https://github.com/Azure/go-autorest/blob/50e09bb39af124f28f29ba60efde3fa74a4fe93f/logger/logger.go#L65-L73) |
 | `feature.enableFSGroupPolicy`                     | enable `fsGroupPolicy` on a k8s 1.20+ cluster              | `true`                      |
+| `feature.enableSELinuxMount`                      | enable `seLinuxMount` on a k8s 1.30+ cluster ([KEP 1710](https://github.com/kubernetes/enhancements/issues/1710)), mounts `/sys/fs/selinux` and `/etc/selinux` into the node driver container so that mount-time SELinux labeling works | `false`                     |
 | `image.baseRepo`                                  | base repository of driver images                           | `mcr.microsoft.com`                      |
-| `image.azuredisk.repository`                      | azuredisk-csi-driver container image                          | `/oss/kubernetes-csi/azuredisk-csi`                      |
+| `image.azuredisk.repository`                      | azuredisk-csi-driver container image                          | `/k8s/csi/azuredisk-csi`                      |
 | `image.azuredisk.tag`                             | azuredisk-csi-driver container image tag                      | ``                                                       |
 | `image.azuredisk.pullPolicy`                      | azuredisk-csi-driver image pull policy                     | `IfNotPresent`                                                 |
-| `image.csiProvisioner.repository`                 | csi-provisioner container image                               | `/oss/kubernetes-csi/csi-provisioner`         |
-| `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v6.2.0`                                                       |
+| `image.csiProvisioner.repository`                 | csi-provisioner container image                               | `/oss/v2/kubernetes-csi/csi-provisioner`         |
+| `image.csiProvisioner.tag`                        | csi-provisioner container image tag                           | `v6.3.0`                                                       |
 | `image.csiProvisioner.pullPolicy`                 | csi-provisioner image pull policy                          | `IfNotPresent`                                                 |
-| `image.csiAttacher.repository`                    | csi-attacher container image                                  | `/oss/kubernetes-csi/csi-attacher`            |
-| `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.11.0`                                                       |
+| `image.csiAttacher.repository`                    | csi-attacher container image                                  | `/oss/v2/kubernetes-csi/csi-attacher`            |
+| `image.csiAttacher.tag`                           | csi-attacher container image tag                              | `v4.12.0`                                                       |
 | `image.csiAttacher.pullPolicy`                    | csi-attacher image pull policy                             | `IfNotPresent`                                                 |
-| `image.csiResizer.repository`                     | csi-resizer container image                                   | `/oss/kubernetes-csi/csi-resizer`             |
-| `image.csiResizer.tag`                            | csi-resizer container image tag                               | `v2.1.0`                                                       |
+| `image.csiResizer.repository`                     | csi-resizer container image                                   | `/oss/v2/kubernetes-csi/csi-resizer`             |
+| `image.csiResizer.tag`                            | csi-resizer container image tag                               | `v2.2.1`                                                       |
 | `image.csiResizer.pullPolicy`                     | csi-resizer image pull policy                              | `IfNotPresent`                                                 |
-| `image.livenessProbe.repository`                  | liveness-probe container image                                | `/oss/kubernetes-csi/livenessprobe`           |
-| `image.livenessProbe.tag`                         | liveness-probe container image tag                            | `v2.18.0`                                                       |
+| `image.livenessProbe.repository`                  | liveness-probe container image                                | `/oss/v2/kubernetes-csi/livenessprobe`           |
+| `image.livenessProbe.tag`                         | liveness-probe container image tag                            | `v2.19.0`                                                       |
 | `image.livenessProbe.pullPolicy`                  | liveness-probe image pull policy                           | `IfNotPresent`                                                 |
-| `image.nodeDriverRegistrar.repository`            | csi-node-driver-registrar container image                     | `/oss/kubernetes-csi/csi-node-driver-registrar` |
-| `image.nodeDriverRegistrar.tag`                   | csi-node-driver-registrar container image tag                 | `v2.16.0`                                                       |
+| `image.nodeDriverRegistrar.repository`            | csi-node-driver-registrar container image                     | `/oss/v2/kubernetes-csi/csi-node-driver-registrar` |
+| `image.nodeDriverRegistrar.tag`                   | csi-node-driver-registrar container image tag                 | `v2.17.0`                                                       |
 | `image.nodeDriverRegistrar.pullPolicy`            | csi-node-driver-registrar image pull policy                | `IfNotPresent`                                                 |
 | `imagePullSecrets`                                | Specify docker-registry secret names as an array           | [] (does not add image pull secrets to deployed pods)        |                                       |
 | `serviceAccount.create`                           | whether create service account of csi-azuredisk-controller, csi-azuredisk-node, and snapshot-controller| `true`                                                    |
@@ -164,6 +175,8 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `controller.annotations`                          | controller deployment extra annotations               | `{}`
 | `controller.podLabels`                            | controller pods extra labels                          | `{}`
 | `controller.podAnnotations`                       | controller pods extra annotations                     | `{}`
+| `controller.extraVolumeMounts`                    | additional volumeMounts for azuredisk container in controller pod | `[]`
+| `controller.extraVolumes`                         | additional volumes for controller pod                 | `[]`
 | `controller.hostNetwork`                          | `hostNetwork` setting on controller driver(could be disabled if controller does not depend on MSI setting)                            | `true`                                                            | `true`, `false`
 | `controller.resources.csiProvisioner.limits.memory`   | csi-provisioner memory limits                         | 500Mi                                                          |
 | `controller.resources.csiProvisioner.requests.cpu`    | csi-provisioner cpu requests                   | 10m                                                            |
@@ -201,11 +214,11 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `node.nodeDriverRegistrar.livenessProbe.failureThreshold`    | node-driver-registrar liveness probe failureThreshold                                                      | `2`                                                     |
 | `node.logLevel`                                   | node driver log level                                      |`5`                                                           |
 | `snapshot.enabled`                                | whether enable snapshot feature                            | `false`                                                        |
-| `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter container image                               | `/oss/kubernetes-csi/csi-snapshotter`         |
-| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter container image tag                           | `v8.5.0`                                                       |
+| `snapshot.image.csiSnapshotter.repository`        | csi-snapshotter container image                               | `/oss/v2/kubernetes-csi/csi-snapshotter`         |
+| `snapshot.image.csiSnapshotter.tag`               | csi-snapshotter container image tag                           | `v8.6.0`                                                       |
 | `snapshot.image.csiSnapshotter.pullPolicy`        | csi-snapshotter image pull policy                          | `IfNotPresent`                                                 |
-| `snapshot.image.csiSnapshotController.repository` | snapshot-controller container image                           | `/oss/kubernetes-csi/snapshot-controller`     |
-| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller container image tag                       | `v8.5.0`                                                      |
+| `snapshot.image.csiSnapshotController.repository` | snapshot-controller container image                           | `/oss/v2/kubernetes-csi/snapshot-controller`     |
+| `snapshot.image.csiSnapshotController.tag`        | snapshot-controller container image tag                       | `v8.6.0`                                                      |
 | `snapshot.image.csiSnapshotController.pullPolicy` | snapshot-controller image pull policy                      | `IfNotPresent`                                                 |
 | `snapshot.snapshotController.name`                | snapshot controller name                                   | `csi-snapshot-controller`                                                           |
 | `snapshot.snapshotController.replicas`            | the replicas of snapshot-controller                        | `2`                                                            |
@@ -233,6 +246,8 @@ The following table lists the configurable parameters of the latest Azure Disk C
 | `linux.otelTracing.otelExporterEndpoint`          | opentelemetry-compatible endpoint where traces are sent      | `"http://localhost:4317"`                          |
 | `linux.podLabels`                                 | linux node pods extra labels                          | `{}`
 | `linux.podAnnotations`                            | linux node pods extra annotations                     | `{}`
+| `linux.extraVolumeMounts`                         | additional volumeMounts for azuredisk container in linux node pod | `[]`
+| `linux.extraVolumes`                              | additional volumes for linux node pod                 | `[]`
 | `linux.resources.livenessProbe.limits.memory`          | liveness-probe memory limits                          | 100Mi                                                          |
 | `linux.resources.livenessProbe.requests.cpu`           | liveness-probe cpu requests                    | 10m                                                            |
 | `linux.resources.livenessProbe.requests.memory`        | liveness-probe memory requests                 | 20Mi                                                           |

@@ -31,6 +31,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	kwait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 	cloudprovider "k8s.io/cloud-provider"
 	volerr "k8s.io/cloud-provider/volume/errors"
 	"k8s.io/klog/v2"
@@ -67,7 +68,7 @@ const (
 	defaultDetachOperationMinTimeoutInSeconds = 240
 
 	// default timeout for VMSS detach operation before polling on GET VM to verify detach status
-	defaultVMSSDetachTimeoutInSeconds = 20
+	defaultVMSSDetachTimeoutInSeconds = 200
 
 	// WriteAcceleratorEnabled support for Azure Write Accelerator on Azure Disks
 	// https://docs.microsoft.com/azure/virtual-machines/windows/how-to-enable-write-accelerator
@@ -92,6 +93,7 @@ type controllerCommon struct {
 	lockMap       *lockMap
 	cloud         *provider.Cloud
 	clientFactory azclient.ClientFactory
+	nodeLister    cache.GenericLister
 	// disk queue that is waiting for attach or detach on specific node
 	// <nodeName, map<diskURI, *provider.AttachDiskOptions/DetachDiskOptions>>
 	attachDiskMap sync.Map
@@ -162,13 +164,7 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 		}
 
 		if disk.Properties != nil {
-			if disk.Properties.DiskSizeGB != nil && *disk.Properties.DiskSizeGB >= diskCachingLimit && cachingMode != armcompute.CachingTypesNone {
-				// Disk Caching is not supported for disks 4 TiB and larger
-				// https://docs.microsoft.com/en-us/azure/virtual-machines/premium-storage-performance#disk-caching
-				cachingMode = armcompute.CachingTypesNone
-				klog.Warningf("size of disk(%s) is %dGB which is bigger than limit(%dGB), set cacheMode as None",
-					diskURI, *disk.Properties.DiskSizeGB, diskCachingLimit)
-			}
+			cachingMode = effectiveCachingModeForDisk(cachingMode, disk.Properties.DiskSizeGB, diskURI)
 
 			if disk.Properties.Encryption != nil &&
 				disk.Properties.Encryption.DiskEncryptionSetID != nil {
@@ -234,7 +230,13 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 
 	numDisksAllowed := math.MaxInt
 	if c.CheckDiskCountForBatching {
-		_, instanceType, err := GetNodeInfoFromLabels(ctx, string(nodeName), c.cloud.KubeClient)
+		var instanceType string
+		var err error
+		if c.nodeLister != nil {
+			_, instanceType, err = GetNodeInfoFromNodeLister(string(nodeName), c.nodeLister)
+		} else {
+			_, instanceType, err = GetNodeInfoFromLabels(ctx, string(nodeName), c.cloud.KubeClient)
+		}
 		if err != nil {
 			klog.Errorf("failed to get node info from labels: %v", err)
 		} else if instanceType != "" {
@@ -320,6 +322,16 @@ func (c *controllerCommon) AttachDisk(ctx context.Context, diskName, diskURI str
 		return c.verifyAttach(ctx, diskName, diskURI, nodeName)
 	}
 	return lun, nil
+}
+
+func effectiveCachingModeForDisk(cachingMode armcompute.CachingTypes, diskSizeGB *int32, diskURI string) armcompute.CachingTypes {
+	if diskSizeGB != nil && *diskSizeGB >= diskCachingLimit && cachingMode != armcompute.CachingTypesNone {
+		// Disk caching is not supported for disks 4 TiB and larger.
+		cachingMode = armcompute.CachingTypesNone
+		klog.Warningf("size of disk(%s) is %dGB which is bigger than limit(%dGB), set cacheMode as None",
+			diskURI, *diskSizeGB, diskCachingLimit)
+	}
+	return cachingMode
 }
 
 // insertAttachDiskRequest return (attachDiskRequestQueueLength, error)

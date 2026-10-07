@@ -153,6 +153,9 @@ var _ = ginkgo.BeforeSuite(func(ctx ginkgo.SpecContext) {
 			Kubeconfig:              os.Getenv(kubeconfigEnvVar),
 			Endpoint:                fmt.Sprintf("unix:///tmp/csi-%s.sock", string(uuid.NewUUID())),
 			GetDiskTimeoutInSeconds: 15,
+			// Share the feature gates parsed from --feature-gates so direct
+			// CreateVolume calls with attachMode=NodeDriven are not rejected.
+			FeatureGates: driver.FeatureGates,
 		}
 		os.Setenv("AZURE_CREDENTIAL_FILE", credentials.TempAzureCredentialFilePath)
 		azurediskDriver = azuredisk.NewDriver(&driverOptions)
@@ -260,14 +263,23 @@ var _ = ginkgo.AfterSuite(func(_ ginkgo.SpecContext) {
 	}
 })
 
-func TestE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
+func junitReportPath() string {
 	reportDir := os.Getenv(reportDirEnvVar)
 	if reportDir == "" {
 		reportDir = defaultReportDir
 	}
-	r := []ginkgo.Reporter{reporters.NewJUnitReporter(path.Join(reportDir, "junit_01.xml"))}
-	ginkgo.RunSpecsWithDefaultAndCustomReporters(t, "AzureDisk CSI Driver End-to-End Tests", r)
+	return path.Join(reportDir, "junit_01.xml")
+}
+
+var _ = ginkgo.ReportAfterSuite("JUnit report", func(report ginkgo.Report) {
+	reportPath := junitReportPath()
+	gomega.Expect(os.MkdirAll(path.Dir(reportPath), 0755)).To(gomega.Succeed())
+	gomega.Expect(reporters.GenerateJUnitReport(report, reportPath)).To(gomega.Succeed())
+})
+
+func TestE2E(t *testing.T) {
+	gomega.RegisterFailHandler(ginkgo.Fail)
+	ginkgo.RunSpecs(t, "AzureDisk CSI Driver End-to-End Tests")
 }
 
 func execTestCmd(cmds []testCmd) {

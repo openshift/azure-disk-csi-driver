@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	api "k8s.io/kubernetes/pkg/apis/core"
@@ -44,6 +47,7 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/optimization"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/util"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/configloader"
+	retryrepectthrottled "sigs.k8s.io/cloud-provider-azure/pkg/azclient/policy/retryrepectthrottled"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 	azureconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
 )
@@ -251,7 +255,7 @@ func GetCloudProviderFromClient(ctx context.Context, kubeClient clientset.Interf
 	return az, nil
 }
 
-func GetKubeClient(kubeconfig string, qps float64, burst int) (clientset.Interface, error) {
+func GetKubeConfig(kubeconfig string, qps float64, burst int) (*rest.Config, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, err
@@ -262,6 +266,15 @@ func GetKubeClient(kubeconfig string, qps float64, burst int) (clientset.Interfa
 	}
 	if burst > 0 {
 		config.Burst = burst
+	}
+
+	return config, nil
+}
+
+func GetKubeClient(kubeconfig string, qps float64, burst int) (clientset.Interface, error) {
+	config, err := GetKubeConfig(kubeconfig, qps, burst)
+	if err != nil {
+		return nil, err
 	}
 
 	return clientset.NewForConfig(config)
@@ -282,7 +295,7 @@ func GetDiskLUN(deviceInfo string) (int32, error) {
 		}
 	}
 
-	lun, err := strconv.Atoi(diskLUN)
+	lun, err := strconv.ParseInt(diskLUN, 10, 32)
 	if err != nil {
 		return -1, err
 	}
@@ -321,6 +334,28 @@ func GetFStype(attributes map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// SupportedFSTypes returns the filesystem types this node can actually format and mount.
+// The Linux image ships e2fsprogs/xfsprogs/btrfs-progs but no NTFS formatter, and the
+// Windows mounters ignore fstype and always format NTFS, so the sets are disjoint.
+func SupportedFSTypes() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"ntfs"}
+	}
+	return []string{"btrfs", "ext2", "ext3", "ext4", "xfs"}
+}
+
+// NormalizeFSType lowercases fsType and verifies it is supported on the current OS.
+// The value reaches `mkfs.<fstype>` and `mount -t <fstype>`, so restricting it also
+// prevents untrusted volume attributes from selecting an arbitrary helper binary.
+func NormalizeFSType(fsType string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(fsType))
+	supported := SupportedFSTypes()
+	if !slices.Contains(supported, normalized) {
+		return "", fmt.Errorf("fsType(%q) is not supported on %s, supported fsTypes are %v", normalized, runtime.GOOS, supported)
+	}
+	return normalized, nil
 }
 
 func GetMaxShares(attributes map[string]string) (int, error) {
@@ -674,6 +709,10 @@ func ParseDiskParameters(parameters map[string]string) (ManagedDiskParameters, e
 			}
 		case consts.TagValueDelimiterField:
 			tagValueDelimiter = v
+		case consts.AttachModeField:
+			// No need to do anything, just don't fail the validation.
+			// These parameters only need to remain available in the volume context.
+			continue
 		default:
 			// accept all device settings params
 			// device settings need to start with azureconstants.DeviceSettingsKeyPrefix
@@ -805,7 +844,9 @@ func SleepIfThrottled(err error, defaultSleepSec int) {
 func IsThrottlingError(err error) bool {
 	if err != nil {
 		errMsg := strings.ToLower(err.Error())
-		return strings.Contains(errMsg, strings.ToLower(consts.TooManyRequests)) || strings.Contains(errMsg, consts.ClientThrottled)
+		return strings.Contains(errMsg, strings.ToLower(consts.TooManyRequests)) ||
+			strings.Contains(errMsg, consts.ClientThrottled) ||
+			strings.Contains(errMsg, retryrepectthrottled.ErrTooManyRequest.Error())
 	}
 	return false
 }
