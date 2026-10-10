@@ -2,9 +2,15 @@ FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.26-openshift-5.0 AS b
 WORKDIR /go/src/github.com/openshift/azure-disk-csi-driver
 COPY . .
 RUN make azuredisk ARCH=$(go env GOARCH) && cp _output/$(go env GOARCH)/azurediskplugin .
+RUN cd cmd/openshift-tests-extension && \
+    CGO_ENABLED=0 GO_COMPLIANCE_POLICY="exempt_all" GOFLAGS="" go build \
+    -mod=mod -ldflags "-s -w" \
+    -o /tmp/azure-disk-csi-driver-test . && \
+    gzip /tmp/azure-disk-csi-driver-test
 
 FROM registry.ci.openshift.org/ocp/5.0:base-rhel9
 COPY --from=builder /go/src/github.com/openshift/azure-disk-csi-driver/azurediskplugin /bin/azurediskplugin
+COPY --from=builder /tmp/azure-disk-csi-driver-test.gz /usr/bin/azure-disk-csi-driver-test.gz
 RUN yum install -y util-linux e2fsprogs xfsprogs ca-certificates && yum clean all && rm -rf /var/cache/yum
 
 LABEL description="Azure Disk CSI Driver"
