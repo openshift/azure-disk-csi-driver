@@ -449,6 +449,12 @@ func parseRSA(in []byte) (out PublicKey, rest []byte, err error) {
 		return nil, nil, err
 	}
 
+	// 8192 bits is also the maximum RSA key size accepted by crypto/tls for
+	// signature verification:
+	// https://github.com/golang/go/blob/69801b25/src/crypto/tls/handshake_client.go#L1096
+	if w.N.BitLen() > 8192 {
+		return nil, nil, errors.New("ssh: rsa modulus too large")
+	}
 	if w.E.BitLen() > 24 {
 		return nil, nil, errors.New("ssh: exponent too large")
 	}
@@ -509,6 +515,24 @@ func checkDSAParams(param *dsa.Parameters) error {
 		return fmt.Errorf("ssh: unsupported DSA key size %d", l)
 	}
 
+	// FIPS 186-2 specifies that Q must be exactly 160 bits. We must enforce
+	// this to prevent DoS attacks where an attacker sends a huge Q which makes
+	// verification slow.
+	if l := param.Q.BitLen(); l != 160 {
+		return fmt.Errorf("ssh: unsupported DSA sub-prime size %d", l)
+	}
+
+	// The generator G is an element of the group, so it must be strictly less
+	// than the modulus P.
+	if param.G.Cmp(param.P) >= 0 {
+		return errors.New("ssh: DSA generator larger than modulus")
+	}
+
+	// G must be positive.
+	if param.G.Sign() <= 0 {
+		return errors.New("ssh: DSA generator must be positive")
+	}
+
 	return nil
 }
 
@@ -529,6 +553,14 @@ func parseDSA(in []byte) (out PublicKey, rest []byte, err error) {
 	}
 	if err := checkDSAParams(&param); err != nil {
 		return nil, nil, err
+	}
+
+	// The public value Y must be a non-zero element of the group, i.e.
+	// strictly between 0 and P. crypto/dsa.Verify does not range-check Y,
+	// so we reject out-of-range values here to prevent a maliciously
+	// oversized Y from slowing verification.
+	if w.Y.Sign() <= 0 || w.Y.Cmp(w.P) >= 0 {
+		return nil, nil, errors.New("ssh: DSA public value Y out of range")
 	}
 
 	key := &dsaPublicKey{
@@ -904,6 +936,10 @@ func (k *skECDSAPublicKey) Verify(data []byte, sig *Signature) error {
 	return errors.New("ssh: signature did not verify")
 }
 
+func (k *skECDSAPublicKey) CryptoPublicKey() crypto.PublicKey {
+	return &k.PublicKey
+}
+
 type skEd25519PublicKey struct {
 	// application is a URL-like string, typically "ssh:" for SSH.
 	// see openssh/PROTOCOL.u2f for details.
@@ -998,6 +1034,10 @@ func (k *skEd25519PublicKey) Verify(data []byte, sig *Signature) error {
 	}
 
 	return nil
+}
+
+func (k *skEd25519PublicKey) CryptoPublicKey() crypto.PublicKey {
+	return k.PublicKey
 }
 
 // NewSignerFromKey takes an *rsa.PrivateKey, *dsa.PrivateKey,
@@ -1232,16 +1272,27 @@ func ParseRawPrivateKeyWithPassphrase(pemBytes, passphrase []byte) (interface{},
 		return nil, fmt.Errorf("ssh: cannot decode encrypted private keys: %v", err)
 	}
 
+	var result interface{}
+
 	switch block.Type {
 	case "RSA PRIVATE KEY":
-		return x509.ParsePKCS1PrivateKey(buf)
+		result, err = x509.ParsePKCS1PrivateKey(buf)
 	case "EC PRIVATE KEY":
-		return x509.ParseECPrivateKey(buf)
+		result, err = x509.ParseECPrivateKey(buf)
 	case "DSA PRIVATE KEY":
-		return ParseDSAPrivateKey(buf)
+		result, err = ParseDSAPrivateKey(buf)
 	default:
-		return nil, fmt.Errorf("ssh: unsupported key type %q", block.Type)
+		err = fmt.Errorf("ssh: unsupported key type %q", block.Type)
 	}
+	// Because of deficiencies in the format, DecryptPEMBlock does not always
+	// detect an incorrect password. In these cases decrypted DER bytes is
+	// random noise. If the parsing of the key returns an asn1.StructuralError
+	// we return x509.IncorrectPasswordError.
+	if _, ok := err.(asn1.StructuralError); ok {
+		return nil, x509.IncorrectPasswordError
+	}
+
+	return result, err
 }
 
 // ParseDSAPrivateKey returns a DSA private key from its ASN.1 DER encoding, as
