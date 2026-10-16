@@ -18,7 +18,7 @@ REGISTRY ?= andyzhangx
 REGISTRY_NAME ?= $(shell echo $(REGISTRY) | sed "s/.azurecr.io//g")
 IMAGE_NAME ?= azuredisk-csi
 PLUGIN_NAME = azurediskplugin
-IMAGE_VERSION ?= v1.34.4
+IMAGE_VERSION ?= v1.35.0
 CHART_VERSION ?= latest
 CLOUD ?= AzurePublicCloud
 # Use a custom version for E2E tests if we are testing in CI
@@ -33,7 +33,7 @@ REV = $(shell git describe --long --tags --dirty)
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 ENABLE_TOPOLOGY ?= false
 LDFLAGS ?= "-X ${PKG}/pkg/azuredisk.driverVersion=${IMAGE_VERSION} -X ${PKG}/pkg/azuredisk.gitCommit=${GIT_COMMIT} -X ${PKG}/pkg/azuredisk.buildDate=${BUILD_DATE} -extldflags "-static"" ${GOTAGS}
-E2E_HELM_OPTIONS ?= --set image.azuredisk.repository=$(REGISTRY)/$(IMAGE_NAME) --set image.azuredisk.tag=$(IMAGE_VERSION) --set image.azuredisk.pullPolicy=Always --set driver.userAgentSuffix="e2e-test" --set snapshot.VolumeSnapshotClass.enabled=true --set snapshot.enabled=true --set node.getNodeIDFromIMDS=true --set controller.runOnControlPlane=true --set controller.replicas=1 --set snapshot.snapshotController.replicas=1
+E2E_HELM_OPTIONS ?= --set image.azuredisk.repository=$(REGISTRY)/$(IMAGE_NAME) --set image.azuredisk.tag=$(IMAGE_VERSION) --set image.azuredisk.pullPolicy=Always --set driver.featureGates.KataMount=false --set driver.userAgentSuffix="e2e-test" --set snapshot.VolumeSnapshotClass.enabled=true --set snapshot.enabled=true --set node.getNodeIDFromIMDS=true --set controller.runOnControlPlane=true --set controller.replicas=1 --set snapshot.snapshotController.replicas=1
 E2E_HELM_OPTIONS += ${EXTRA_HELM_OPTIONS}
 ifdef DISABLE_ZONE
 E2E_HELM_OPTIONS += --set node.supportZone=false

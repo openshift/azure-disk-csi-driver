@@ -27,11 +27,19 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	consts "sigs.k8s.io/azuredisk-csi-driver/pkg/azureconstants"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/diskclient/mock_diskclient"
@@ -40,6 +48,35 @@ import (
 	mockvmclient "sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient/mock_virtualmachineclient"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
+
+func TestHasQADInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		pv   *corev1.PersistentVolume
+		want bool
+	}{
+		{name: "nil PV", pv: nil, want: false},
+		{name: "empty name", pv: &corev1.PersistentVolume{}, want: false},
+		{
+			name: "attach-sequence annotation present",
+			pv: &corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "pv", Annotations: map[string]string{consts.AttachSequenceAnnotation: "0"}},
+			},
+			want: true,
+		},
+		{
+			name: "no attach-sequence annotation",
+			pv:   &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
+			want: false,
+		},
+	}
+	d := &Driver{}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, d.hasQADInfo(test.pv))
+		})
+	}
+}
 
 func TestNewDriver(t *testing.T) {
 	d := NewDriver(&DriverOptions{
@@ -51,6 +88,34 @@ func TestNewDriver(t *testing.T) {
 		AllowEmptyCloudConfig:  true,
 	})
 	assert.NotNil(t, d)
+}
+
+func TestNewDriverKataMountFeatureGate(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		d := NewDriver(&DriverOptions{
+			NodeID:                consts.DefaultDriverName,
+			DriverName:            consts.DefaultDriverName,
+			Kubeconfig:            "",
+			AllowEmptyCloudConfig: true,
+		})
+		require.NotNil(t, d)
+		assert.False(t, d.enableKataMount)
+	})
+
+	t.Run("enabled via feature gate", func(t *testing.T) {
+		featureGates := NewDriverFeatureGate()
+		require.NoError(t, featureGates.SetFromMap(map[string]bool{string(KataMount): true}))
+
+		d := NewDriver(&DriverOptions{
+			NodeID:                consts.DefaultDriverName,
+			DriverName:            consts.DefaultDriverName,
+			Kubeconfig:            "",
+			AllowEmptyCloudConfig: true,
+			FeatureGates:          featureGates,
+		})
+		require.NotNil(t, d)
+		assert.True(t, d.enableKataMount)
+	})
 }
 
 func TestCheckDiskCapacity(t *testing.T) {
@@ -273,6 +338,118 @@ func TestRun(t *testing.T) {
 	}
 }
 
+func TestPVInformerCacheSyncTimeoutDisablesIndexer(t *testing.T) {
+	d := &Driver{
+		pvIndexer:      cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
+		pvListerSynced: func() bool { return false },
+	}
+
+	if d.waitForPVInformerCacheSync(context.Background(), time.Millisecond) {
+		t.Fatal("expected PV informer cache sync to time out")
+	}
+	assert.Nil(t, d.pvIndexer)
+}
+
+func TestInitializePVInformerRequiresNodeDrivenAttachDetach(t *testing.T) {
+	kubeClient := fake.NewClientset()
+
+	disabledDriver := &Driver{}
+	disabledDriver.initializePVInformer(kubeClient)
+	assert.Nil(t, disabledDriver.informerFactory)
+	assert.Nil(t, disabledDriver.pvIndexer)
+	assert.Nil(t, disabledDriver.pvLister)
+	assert.Nil(t, disabledDriver.pvListerSynced)
+
+	enabledDriver := &Driver{nodeDrivenAttachDetachEnabled: true}
+	enabledDriver.initializePVInformer(kubeClient)
+	assert.NotNil(t, enabledDriver.informerFactory)
+	assert.NotNil(t, enabledDriver.pvIndexer)
+	assert.NotNil(t, enabledDriver.pvLister)
+	assert.NotNil(t, enabledDriver.pvListerSynced)
+}
+
+func TestGetPVFromDiskURIWithoutKubeClient(t *testing.T) {
+	d := &Driver{}
+
+	pv, err := d.getPVFromDiskURI(context.Background(), "disk-uri")
+
+	assert.Nil(t, pv)
+	assert.ErrorIs(t, err, errPVMetadataUnavailable)
+}
+
+func TestGetPVFromDiskURIUsesIndexedCandidate(t *testing.T) {
+	const diskURI = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/disk"
+	indexedPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv"},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: consts.DefaultDriverName, VolumeHandle: diskURI},
+		}},
+	}
+	freshPV := indexedPV.DeepCopy()
+	freshPV.Annotations = map[string]string{consts.AttachSequenceAnnotation: "1"}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{pvDiskURIIndex: pvDiskURIIndexFunc})
+	require.NoError(t, indexer.Add(indexedPV))
+	d := &Driver{
+		kubeClient: fake.NewClientset(freshPV),
+		pvIndexer:  indexer,
+	}
+	d.Name = consts.DefaultDriverName
+
+	pv, err := d.getPVFromDiskURI(context.Background(), diskURI)
+
+	require.NoError(t, err)
+	assert.NotSame(t, indexedPV, pv)
+	assert.Equal(t, "1", pv.Annotations[consts.AttachSequenceAnnotation])
+}
+
+func TestGetPVFromDiskURIFallsBackToAPIWhenIndexMisses(t *testing.T) {
+	const diskURI = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/disk"
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv"},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: consts.DefaultDriverName, VolumeHandle: diskURI},
+		}},
+	}
+	d := &Driver{
+		kubeClient: fake.NewClientset(pv),
+		pvIndexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+			pvDiskURIIndex: pvDiskURIIndexFunc,
+		}),
+	}
+	d.Name = consts.DefaultDriverName
+
+	got, err := d.getPVFromDiskURI(context.Background(), diskURI)
+
+	require.NoError(t, err)
+	assert.Equal(t, pv.Name, got.Name)
+}
+
+func TestGetPVFromDiskURIFallsBackWhenIndexedCandidateChanged(t *testing.T) {
+	const diskURI = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/disk"
+	indexedPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-pv"},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: consts.DefaultDriverName, VolumeHandle: diskURI},
+		}},
+	}
+	liveIndexedPV := indexedPV.DeepCopy()
+	liveIndexedPV.Spec.CSI.VolumeHandle = diskURI + "-old"
+	currentPV := indexedPV.DeepCopy()
+	currentPV.Name = "current-pv"
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{pvDiskURIIndex: pvDiskURIIndexFunc})
+	require.NoError(t, indexer.Add(indexedPV))
+	d := &Driver{
+		kubeClient: fake.NewClientset(liveIndexedPV, currentPV),
+		pvIndexer:  indexer,
+	}
+	d.Name = consts.DefaultDriverName
+
+	got, err := d.getPVFromDiskURI(context.Background(), diskURI)
+
+	require.NoError(t, err)
+	assert.Equal(t, currentPV.Name, got.Name)
+}
+
 func TestDriver_checkDiskExists(t *testing.T) {
 	cntl := gomock.NewController(t)
 	defer cntl.Finish()
@@ -290,24 +467,161 @@ func TestDriver_CheckDiskExists_Success(t *testing.T) {
 	assert.Equal(t, err, nil)
 }
 
-func TestGetNodeInfoFromLabels(t *testing.T) {
+// fakeErrorNodeLister is a GenericLister that always returns a specified error.
+type fakeErrorNodeLister struct {
+	err error
+}
+
+func (f *fakeErrorNodeLister) List(selector labels.Selector) ([]runtime.Object, error) {
+	return nil, f.err
+}
+
+func (f *fakeErrorNodeLister) Get(name string) (runtime.Object, error) {
+	return nil, f.err
+}
+
+func (f *fakeErrorNodeLister) ByNamespace(namespace string) cache.GenericNamespaceLister {
+	return nil
+}
+
+func TestGetNodeInfoFromNodeLister(t *testing.T) {
+	nodeGR := schema.GroupResource{Group: "", Resource: "nodes"}
 	tests := []struct {
-		nodeName      string
-		kubeClient    clientset.Interface
-		expectedError error
+		name           string
+		nodeName       string
+		nodeLister     cache.GenericLister
+		expectedZone   string
+		expectedType   string
+		expectedError  error
+		expectErrorNil bool
 	}{
 		{
-			nodeName:      "",
-			kubeClient:    nil,
-			expectedError: fmt.Errorf("kubeClient is nil"),
+			name:          "nil lister",
+			nodeName:      "node1",
+			nodeLister:    nil,
+			expectedError: fmt.Errorf("nodeLister is nil"),
+		},
+		{
+			name:     "lister returns node with labels",
+			nodeName: "node1",
+			nodeLister: func() cache.GenericLister {
+				indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+				node := &metav1.PartialObjectMetadata{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node1",
+						Labels: map[string]string{
+							consts.WellKnownTopologyKey: "westus2-1",
+							consts.InstanceTypeKey:      "Standard_DS2_v2",
+						},
+					},
+				}
+				_ = indexer.Add(node)
+				return cache.NewGenericLister(indexer, nodeGR)
+			}(),
+			expectedZone:   "westus2-1",
+			expectedType:   "Standard_DS2_v2",
+			expectErrorNil: true,
+		},
+		{
+			name:     "lister returns node with empty labels",
+			nodeName: "node1",
+			nodeLister: func() cache.GenericLister {
+				indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+				node := &metav1.PartialObjectMetadata{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "node1",
+						Labels: map[string]string{},
+					},
+				}
+				_ = indexer.Add(node)
+				return cache.NewGenericLister(indexer, nodeGR)
+			}(),
+			expectedError: fmt.Errorf("node(node1) label is empty"),
+		},
+		{
+			name:     "lister does not have the node - returns nil (NotFound is not an error)",
+			nodeName: "missing-node",
+			nodeLister: func() cache.GenericLister {
+				indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+				return cache.NewGenericLister(indexer, nodeGR)
+			}(),
+			expectedZone:   "",
+			expectedType:   "",
+			expectErrorNil: true,
+		},
+		{
+			name:          "lister returns non-NotFound error - propagates error",
+			nodeName:      "node1",
+			nodeLister:    &fakeErrorNodeLister{err: fmt.Errorf("connection refused")},
+			expectedError: fmt.Errorf("get node(node1) from lister failed: connection refused"),
 		},
 	}
 
 	for _, test := range tests {
-		_, _, err := GetNodeInfoFromLabels(context.TODO(), test.nodeName, test.kubeClient)
-		if !reflect.DeepEqual(err, test.expectedError) {
-			t.Errorf("Unexpected result: %v, expected result: %v", err, test.expectedError)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			zone, instanceType, err := GetNodeInfoFromNodeLister(test.nodeName, test.nodeLister)
+			if test.expectErrorNil {
+				assert.NoError(t, err)
+				assert.Equal(t, test.expectedZone, zone)
+				assert.Equal(t, test.expectedType, instanceType)
+			} else {
+				assert.EqualError(t, err, test.expectedError.Error())
+			}
+		})
+	}
+}
+
+func TestGetNodeInfoFromLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		nodeName       string
+		kubeClient     clientset.Interface
+		expectedZone   string
+		expectedType   string
+		expectedError  error
+		expectErrorNil bool
+	}{
+		{
+			name:          "nil kubeClient",
+			nodeName:      "",
+			kubeClient:    nil,
+			expectedError: fmt.Errorf("kubeClient is nil"),
+		},
+		{
+			name:     "kubeClient returns node with labels",
+			nodeName: "node1",
+			kubeClient: fake.NewClientset(&corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node1",
+					Labels: map[string]string{
+						consts.WellKnownTopologyKey: "centralus-1",
+						consts.InstanceTypeKey:      "Standard_E8s_v3",
+					},
+				},
+			}),
+			expectedZone:   "centralus-1",
+			expectedType:   "Standard_E8s_v3",
+			expectErrorNil: true,
+		},
+		{
+			name:          "kubeClient node not found",
+			nodeName:      "missing-node",
+			kubeClient:    fake.NewClientset(),
+			expectedError: fmt.Errorf("get node(missing-node) failed with nodes \"missing-node\" not found"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			zone, instanceType, err := GetNodeInfoFromLabels(context.TODO(), test.nodeName, test.kubeClient)
+			if test.expectErrorNil {
+				assert.NoError(t, err)
+				assert.Equal(t, test.expectedZone, zone)
+				assert.Equal(t, test.expectedType, instanceType)
+			} else {
+				assert.EqualError(t, err, test.expectedError.Error())
+			}
+		})
 	}
 }
 

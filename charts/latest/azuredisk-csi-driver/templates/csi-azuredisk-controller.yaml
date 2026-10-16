@@ -142,6 +142,8 @@ spec:
             - "--extra-create-metadata=true"
             - "--retry-interval-max=30m"
             - "--worker-threads=250"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=200"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -233,6 +235,7 @@ spec:
             - "--disable-avset-nodes={{ .Values.controller.disableAvailabilitySetNodes }}"
             - "--vm-type={{ .Values.controller.vmType }}"
             - "--drivername={{ .Values.driver.name }}"
+            - "--feature-gates=NodeDrivenAttachDetach={{ .Values.driver.featureGates.NodeDrivenAttachDetach }}"
             - "--cloud-config-secret-name={{ .Values.controller.cloudConfigSecretName }}"
             - "--cloud-config-secret-namespace={{ .Values.controller.cloudConfigSecretNamespace }}"
             - "--custom-user-agent={{ .Values.driver.customUserAgent }}"
@@ -310,6 +313,7 @@ spec:
               name: socket-dir
             - mountPath: /etc/kubernetes/
               name: azure-cred
+              readOnly: true
             {{- if or (eq .Values.cloud "AzureStackCloud") (eq .Values.linux.distro "fedora") }}
             - name: ssl
               mountPath: /etc/ssl/certs
@@ -319,6 +323,9 @@ spec:
             - name: ssl-pki
               mountPath: /etc/pki/ca-trust/extracted
               readOnly: true
+            {{- end }}
+            {{- with .Values.controller.extraVolumeMounts }}
+{{ toYaml . | indent 12 }}
             {{- end }}
           resources: {{- toYaml .Values.controller.resources.azuredisk | nindent 12 }}
           securityContext:
@@ -341,4 +348,7 @@ spec:
         - name: ssl-pki
           hostPath:
             path: /etc/pki/ca-trust/extracted
+        {{- end }}
+        {{- with .Values.controller.extraVolumes }}
+{{ toYaml . | indent 8 }}
         {{- end }}

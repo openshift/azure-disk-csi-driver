@@ -7,7 +7,10 @@ metadata:
     snapshot: "{{ .Values.snapshot.image.csiSnapshotter.tag }}"
 spec:
   attachRequired: true
-  podInfoOnMount: false
+  podInfoOnMount: {{ .Values.driver.featureGates.KataMount }}
   {{- if .Values.feature.enableFSGroupPolicy}}
   fsGroupPolicy: File
+  {{- end}}
+  {{- if .Values.feature.enableSELinuxMount}}
+  seLinuxMount: true
   {{- end}}
