@@ -1,12 +1,11 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package otlptracegrpc
+package otlptracegrpc // import "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -17,23 +16,20 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc/internal"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc/internal/counter"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc/internal/observ"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc/internal/otlpconfig"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc/internal/retry"
 )
 
 type client struct {
-	endpoint       string
-	dialOpts       []grpc.DialOption
-	metadata       metadata.MD
-	exportTimeout  time.Duration
-	maxRequestSize int
-	requestFunc    retry.RequestFunc
+	endpoint      string
+	dialOpts      []grpc.DialOption
+	metadata      metadata.MD
+	exportTimeout time.Duration
+	requestFunc   retry.RequestFunc
 
 	// stopCtx is used as a parent context for all exports. Therefore, when it
 	// is canceled with the stopFunc all exports are canceled.
@@ -49,9 +45,6 @@ type client struct {
 	conn    *grpc.ClientConn
 	tscMu   sync.RWMutex
 	tsc     coltracepb.TraceServiceClient
-
-	instID int64
-	inst   *observ.Instrumentation
 }
 
 // Compile time check *client implements otlptrace.Client.
@@ -65,18 +58,16 @@ func NewClient(opts ...Option) otlptrace.Client {
 func newClient(opts ...Option) *client {
 	cfg := otlpconfig.NewGRPCConfig(asGRPCOptions(opts)...)
 
-	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec  // cancel called in client shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &client{
-		endpoint:       cfg.Traces.Endpoint,
-		exportTimeout:  cfg.Traces.Timeout,
-		maxRequestSize: cfg.Traces.MaxRequestSize,
-		requestFunc:    cfg.RetryConfig.RequestFunc(retryable),
-		dialOpts:       cfg.DialOptions,
-		stopCtx:        ctx,
-		stopFunc:       cancel,
-		conn:           cfg.GRPCConn,
-		instID:         counter.NextExporterID(),
+		endpoint:      cfg.Traces.Endpoint,
+		exportTimeout: cfg.Traces.Timeout,
+		requestFunc:   cfg.RetryConfig.RequestFunc(retryable),
+		dialOpts:      cfg.DialOptions,
+		stopCtx:       ctx,
+		stopFunc:      cancel,
+		conn:          cfg.GRPCConn,
 	}
 
 	if len(cfg.Traces.Headers) > 0 {
@@ -101,24 +92,13 @@ func (c *client) Start(context.Context) error {
 		c.conn = conn
 	}
 
-	// Initialize the instrumentation if not already done.
-	//
-	// Initialize here instead of NewClient to allow any errors to be passed
-	// back to the caller and so that any setup of the environment variables to
-	// enable instrumentation can be set via code.
-	var err error
-	if c.inst == nil {
-		target := c.conn.CanonicalTarget()
-		c.inst, err = observ.NewInstrumentation(c.instID, target)
-	}
-
 	// The otlptrace.Client interface states this method is called just once,
 	// so no need to check if already started.
 	c.tscMu.Lock()
 	c.tsc = coltracepb.NewTraceServiceClient(c.conn)
 	c.tscMu.Unlock()
 
-	return err
+	return nil
 }
 
 var errAlreadyStopped = errors.New("the client is already stopped")
@@ -194,7 +174,7 @@ var errShutdown = errors.New("the client is shutdown")
 //
 // Retryable errors from the server will be handled according to any
 // RetryConfig the client was created with.
-func (c *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.ResourceSpans) (uploadErr error) {
+func (c *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.ResourceSpans) error {
 	// Hold a read lock to ensure a shut down initiated after this starts does
 	// not abandon the export. This read lock acquire has less priority than a
 	// write lock acquire (i.e. Stop), meaning if the client is shutting down
@@ -209,43 +189,24 @@ func (c *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.Resourc
 	ctx, cancel := c.exportContext(ctx)
 	defer cancel()
 
-	pbRequest := &coltracepb.ExportTraceServiceRequest{
-		ResourceSpans: protoSpans,
-	}
-
-	code := codes.Unknown
-	if c.inst != nil {
-		var spanCount int
-		for _, rs := range protoSpans {
-			for _, ss := range rs.ScopeSpans {
-				spanCount += len(ss.Spans)
-			}
-		}
-		op := c.inst.ExportSpans(ctx, spanCount)
-		defer func() { op.End(uploadErr, code) }()
-	}
-
-	if maxSize := c.maxRequestSize; maxSize > 0 && proto.Size(pbRequest) > maxSize {
-		return fmt.Errorf("request message too large: exceeded %d bytes", maxSize)
-	}
-
 	return c.requestFunc(ctx, func(iCtx context.Context) error {
-		resp, err := c.tsc.Export(iCtx, pbRequest)
+		resp, err := c.tsc.Export(iCtx, &coltracepb.ExportTraceServiceRequest{
+			ResourceSpans: protoSpans,
+		})
 		if resp != nil && resp.PartialSuccess != nil {
 			msg := resp.PartialSuccess.GetErrorMessage()
 			n := resp.PartialSuccess.GetRejectedSpans()
 			if n != 0 || msg != "" {
-				e := internal.TracePartialSuccessError(n, msg)
-				uploadErr = errors.Join(uploadErr, e)
+				err := internal.TracePartialSuccessError(n, msg)
+				otel.Handle(err)
 			}
 		}
 		// nil is converted to OK.
-		code = status.Code(err)
-		if code == codes.OK {
+		if status.Code(err) == codes.OK {
 			// Success.
-			return uploadErr
+			return nil
 		}
-		return errors.Join(uploadErr, err)
+		return err
 	})
 }
 
@@ -264,7 +225,7 @@ func (c *client) exportContext(parent context.Context) (context.Context, context
 	if c.exportTimeout > 0 {
 		ctx, cancel = context.WithTimeoutCause(parent, c.exportTimeout, errors.New("exporter export timeout"))
 	} else {
-		ctx, cancel = context.WithCancel(parent) //nolint:gosec  // cancel called by caller when export is complete.
+		ctx, cancel = context.WithCancel(parent)
 	}
 
 	if c.metadata.Len() > 0 {
@@ -328,10 +289,12 @@ func throttleDelay(s *status.Status) (bool, time.Duration) {
 }
 
 // MarshalLog is the marshaling function used by the logging system to represent this Client.
-func (*client) MarshalLog() any {
+func (c *client) MarshalLog() any {
 	return struct {
-		Type string
+		Type     string
+		Endpoint string
 	}{
-		Type: "otlptracegrpc",
+		Type:     "otlptracegrpc",
+		Endpoint: c.endpoint,
 	}
 }

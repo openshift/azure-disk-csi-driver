@@ -48,15 +48,6 @@ type ManagedDiskController struct {
 	*controllerCommon
 }
 
-type diskManagedError struct {
-	diskURI   string
-	managedBy string
-}
-
-func (e *diskManagedError) Error() string {
-	return fmt.Sprintf("disk(%s) is managed by Azure resource(%s), could not be deleted", e.diskURI, e.managedBy)
-}
-
 func NewManagedDiskController(provider *provider.Cloud) *ManagedDiskController {
 	common := &controllerCommon{
 		cloud:                              provider,
@@ -371,7 +362,7 @@ func (c *ManagedDiskController) DeleteManagedDisk(ctx context.Context, diskURI s
 		return err
 	}
 	if disk.ManagedBy != nil {
-		return &diskManagedError{diskURI: diskURI, managedBy: *disk.ManagedBy}
+		return fmt.Errorf("disk(%s) already attached to node(%s), could not be deleted", diskURI, *disk.ManagedBy)
 	}
 
 	if err = diskClient.Delete(ctx, resourceGroup, diskName); err != nil {

@@ -145,9 +145,12 @@ var _ = ginkgo.Describe("Pre-Provisioned", func() {
 			skipIfUsingInTreeVolumePlugin()
 			skipIfOnAzureStackCloud()
 			req := makeCreateVolumeReq("single-shared-disk", 512)
-			req.Parameters["maxShares"] = "2"
-			req.Parameters["cachingMode"] = "None"
-			req.Parameters["location"] = "eastus2"
+			req.Parameters = map[string]string{
+				"skuName":     "Premium_LRS",
+				"maxShares":   "2",
+				"cachingMode": "None",
+				"location":    "eastus2",
+			}
 			req.VolumeCapabilities[0].AccessType = &csi.VolumeCapability_Block{
 				Block: &csi.VolumeCapability_BlockVolume{},
 			}
@@ -167,9 +170,12 @@ var _ = ginkgo.Describe("Pre-Provisioned", func() {
 			sharedDiskSize := int64(10)
 			req := makeCreateVolumeReq("shared-disk-multiple-pods", sharedDiskSize)
 			diskSize := fmt.Sprintf("%dGi", sharedDiskSize)
-			req.Parameters["maxshares"] = "2"
-			req.Parameters["cachingMode"] = "None"
-			req.Parameters["perfProfile"] = "None"
+			req.Parameters = map[string]string{
+				"skuName":     "Premium_LRS",
+				"maxshares":   "2",
+				"cachingMode": "None",
+				"perfProfile": "None",
+			}
 			req.VolumeCapabilities[0].AccessType = &csi.VolumeCapability_Block{
 				Block: &csi.VolumeCapability_BlockVolume{},
 			}
@@ -234,10 +240,12 @@ var _ = ginkgo.Describe("Pre-Provisioned", func() {
 			skipIfUsingInTreeVolumePlugin()
 			skipIfOnAzureStackCloud()
 			req := makeCreateVolumeReq("premium-v2-disk", 100)
-			req.Parameters["skuName"] = "PremiumV2_LRS"
-			req.Parameters["location"] = "eastus" // eastus2euap, swedencentral, westeurope
-			req.Parameters["DiskIOPSReadWrite"] = "3000"
-			req.Parameters["DiskMBpsReadWrite"] = "200"
+			req.Parameters = map[string]string{
+				"skuName":           "PremiumV2_LRS",
+				"location":          "eastus", // eastus2euap, swedencentral, westeurope
+				"DiskIOPSReadWrite": "3000",
+				"DiskMBpsReadWrite": "200",
+			}
 			req.VolumeCapabilities[0].AccessType = &csi.VolumeCapability_Block{
 				Block: &csi.VolumeCapability_BlockVolume{},
 			}
@@ -253,7 +261,10 @@ var _ = ginkgo.Describe("Pre-Provisioned", func() {
 			skipIfUsingInTreeVolumePlugin()
 			skipIfOnAzureStackCloud()
 			req := makeCreateVolumeReq("reattach-disk-multiple-nodes", defaultDiskSize)
-			req.Parameters["cachingMode"] = "None"
+			req.Parameters = map[string]string{
+				"skuName":     "Premium_LRS",
+				"cachingMode": "None",
+			}
 			req.VolumeCapabilities[0].AccessType = &csi.VolumeCapability_Block{
 				Block: &csi.VolumeCapability_BlockVolume{},
 			}
@@ -341,12 +352,6 @@ var _ = ginkgo.Describe("Pre-Provisioned", func() {
 })
 
 func makeCreateVolumeReq(volumeName string, sizeGiB int64) *csi.CreateVolumeRequest {
-	parameters := map[string]string{}
-	if driver.QADEnabled() {
-		parameters["skuName"] = "Premium_LRS"
-		parameters["attachMode"] = "NodeDriven"
-	}
-
 	req := &csi.CreateVolumeRequest{
 		Name: volumeName,
 		VolumeCapabilities: []*csi.VolumeCapability{
@@ -363,7 +368,6 @@ func makeCreateVolumeReq(volumeName string, sizeGiB int64) *csi.CreateVolumeRequ
 			RequiredBytes: sizeGiB * 1024 * 1024 * 1024,
 			LimitBytes:    sizeGiB * 1024 * 1024 * 1024,
 		},
-		Parameters: parameters,
 	}
 
 	return req
