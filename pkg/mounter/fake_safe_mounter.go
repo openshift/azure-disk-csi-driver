@@ -27,21 +27,10 @@ import (
 	testingexec "k8s.io/utils/exec/testing"
 )
 
-// MountCall records the arguments of a single Mount call.
-type MountCall struct {
-	Source  string
-	Target  string
-	FSType  string
-	Options []string
-}
-
 // FakeSafeMounter implements a mount.Interface interface suitable for use in unit tests.
 type FakeSafeMounter struct {
 	mount.FakeMounter
 	testingexec.FakeExec
-
-	// MountCalls records every Mount call in order, for assertions in tests.
-	MountCalls []MountCall
 }
 
 // NewFakeSafeMounter creates a mount.SafeFormatAndMount instance suitable for use in unit tests.
@@ -60,14 +49,7 @@ func NewFakeSafeMounter() (*mount.SafeFormatAndMount, error) {
 }
 
 // Mount overrides mount.FakeMounter.Mount.
-func (f *FakeSafeMounter) Mount(source, target, fstype string, options []string) error {
-	f.MountCalls = append(f.MountCalls, MountCall{
-		Source:  source,
-		Target:  target,
-		FSType:  fstype,
-		Options: append([]string(nil), options...),
-	})
-
+func (f *FakeSafeMounter) Mount(source, target, _ string, _ []string) error {
 	if strings.Contains(source, "error_mount") {
 		return fmt.Errorf("fake Mount: source error")
 	} else if strings.Contains(target, "error_mount") {

@@ -143,7 +143,6 @@ spec:
             - "--nodeid=$(KUBE_NODE_NAME)"
             - "--enable-perf-optimization={{ .Values.linux.enablePerfOptimization }}"
             - "--drivername={{ .Values.driver.name }}"
-            - "--feature-gates=NodeDrivenAttachDetach={{ .Values.driver.featureGates.NodeDrivenAttachDetach }},KataMount={{ .Values.driver.featureGates.KataMount }}"
             - "--volume-attach-limit={{ .Values.driver.volumeAttachLimit }}"
             - "--reserved-data-disk-slot-num={{ .Values.node.reservedDataDiskSlotNum }}"
             - "--cloud-config-secret-name={{ .Values.node.cloudConfigSecretName }}"
@@ -227,25 +226,17 @@ spec:
           volumeMounts:
             - mountPath: /csi
               name: socket-dir
-            - mountPath: {{ .Values.linux.kubelet }}/pods
+            - mountPath: {{ .Values.linux.kubelet }}/
               mountPropagation: Bidirectional
               name: mountpoint-dir
-            - mountPath: {{ .Values.linux.kubelet }}/plugins
-              mountPropagation: Bidirectional
-              name: plugins-dir
             - mountPath: /etc/kubernetes/
               name: azure-cred
-              readOnly: true
             - mountPath: /dev
               name: device-dir
             - mountPath: /sys/bus/scsi/devices
               name: sys-devices-dir
             - mountPath: /sys/class/
               name: sys-class
-            {{- if .Values.driver.featureGates.KataMount }}
-            - mountPath: /run/kata-containers/shared/direct-volumes
-              name: kata-direct-volumes
-            {{- end }}
             {{- if or (eq .Values.cloud "AzureStackCloud") (eq .Values.linux.distro "fedora") }}
             - name: ssl
               mountPath: /etc/ssl/certs
@@ -256,18 +247,6 @@ spec:
               mountPath: /etc/pki/ca-trust/extracted
               readOnly: true
             {{- end }}
-            {{- if .Values.feature.enableSELinuxMount }}
-            - mountPath: /sys/fs/selinux
-              # intentionally mounted as read-write; /bin/mount with libselinux
-              # checks it's write-able.
-              name: sys-fs-selinux
-            - mountPath: /etc/selinux
-              name: etc-selinux
-              readOnly: true
-            {{- end }}
-            {{- with .Values.linux.extraVolumeMounts }}
-{{ toYaml . | indent 12 }}
-            {{- end }}
           resources: {{- toYaml .Values.linux.resources.azuredisk | nindent 12 }}
       volumes:
         - hostPath:
@@ -275,13 +254,9 @@ spec:
             type: DirectoryOrCreate
           name: socket-dir
         - hostPath:
-            path: {{ .Values.linux.kubelet }}/pods
+            path: {{ .Values.linux.kubelet }}/
             type: DirectoryOrCreate
           name: mountpoint-dir
-        - hostPath:
-            path: {{ .Values.linux.kubelet }}/plugins
-            type: DirectoryOrCreate
-          name: plugins-dir
         - hostPath:
             path: {{ .Values.linux.kubelet }}/plugins_registry/
             type: DirectoryOrCreate
@@ -302,12 +277,6 @@ spec:
             path: /sys/class/
             type: Directory
           name: sys-class
-        {{- if .Values.driver.featureGates.KataMount }}
-        - hostPath:
-            path: /run/kata-containers/shared/direct-volumes/
-            type: DirectoryOrCreate
-          name: kata-direct-volumes
-        {{- end }}
         {{- if or (eq .Values.cloud "AzureStackCloud") (eq .Values.linux.distro "fedora") }}
         - name: ssl
           hostPath:
@@ -317,18 +286,5 @@ spec:
         - name: ssl-pki
           hostPath:
             path: /etc/pki/ca-trust/extracted
-        {{- end }}
-        {{- if .Values.feature.enableSELinuxMount }}
-        - name: sys-fs-selinux
-          hostPath:
-            path: /sys/fs/selinux
-            type: Directory
-        - name: etc-selinux
-          hostPath:
-            path: /etc/selinux
-            type: Directory
-        {{- end }}
-        {{- with .Values.linux.extraVolumes }}
-{{ toYaml . | indent 8 }}
         {{- end }}
 {{- end -}}
