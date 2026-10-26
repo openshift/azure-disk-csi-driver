@@ -65,13 +65,15 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool) {
 	)
 
 	ginkgo.BeforeEach(func(ctx ginkgo.SpecContext) {
-		checkPodsRestart := testCmd{
-			command:  "bash",
-			args:     []string{"test/utils/check_driver_pods_restart.sh"},
-			startLog: "Check driver pods if restarts ...",
-			endLog:   "Check successfully",
+		if os.Getenv("SKIP_DRIVER_INSTALL") != "true" {
+			checkPodsRestart := testCmd{
+				command:  "bash",
+				args:     []string{"test/utils/check_driver_pods_restart.sh"},
+				startLog: "Check driver pods if restarts ...",
+				endLog:   "Check successfully",
+			}
+			execTestCmd([]testCmd{checkPodsRestart})
 		}
-		execTestCmd([]testCmd{checkPodsRestart})
 
 		cs = f.ClientSet
 		ns = f.Namespace
