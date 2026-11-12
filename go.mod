@@ -21,7 +21,7 @@ require (
 	github.com/pborman/uuid v1.2.0
 	github.com/pelletier/go-toml v1.9.4
 	github.com/stretchr/testify v1.8.0
-	golang.org/x/net v0.17.0
+	golang.org/x/net v0.21.0
 	google.golang.org/grpc v1.42.0
 	google.golang.org/protobuf v1.27.1
 	k8s.io/api v0.24.3
@@ -90,11 +90,11 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v0.20.0 // indirect
 	go.opentelemetry.io/otel/trace v0.20.0 // indirect
 	go.opentelemetry.io/proto/otlp v0.7.0 // indirect
-	golang.org/x/crypto v0.14.0 // indirect
+	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20211104180415-d3ed0bb246c8 // indirect
-	golang.org/x/sys v0.13.0 // indirect
-	golang.org/x/term v0.13.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/term v0.29.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
 	golang.org/x/tools v0.1.10 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
@@ -147,3 +147,5 @@ replace (
 	k8s.io/sample-controller => k8s.io/sample-controller v0.24.0-alpha.4
 	sigs.k8s.io/cloud-provider-azure => github.com/openshift/cloud-provider-azure v0.7.5-0.20250513175341-97553af8a82b // release-4.12-azure-disk-csi-driver
 )
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.35.0-sec.4
