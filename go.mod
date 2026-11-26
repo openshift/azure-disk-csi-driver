@@ -164,3 +164,5 @@ replace (
 )
 
 replace golang.org/x/net => github.com/openshift-sustaining/net v0.35.0-sec.4
+
+replace golang.org/x/crypto => github.com/openshift-sustaining/crypto v0.24.0-sec.4.1
